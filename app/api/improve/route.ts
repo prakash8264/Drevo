@@ -12,6 +12,34 @@ function sseEvent(type: string, payload: object): string {
   return `data: ${JSON.stringify({ type, ...payload })}\n\n`;
 }
 
+function getQuotaRetryAfter(message: string): number | null {
+  const m = message.match(/retry in ([\d.]+)s/i);
+  if (m) {
+    const secs = Math.ceil(parseFloat(m[1]));
+    return Number.isFinite(secs) ? secs : null;
+  }
+  return null;
+}
+
+function isQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /quota|exceed.*current quota|generate_content_free_tier|rate.limit|rate_limit|429|resource exhausted/i.test(
+    msg
+  );
+}
+
+function quotaErrorPayload(err: unknown): Record<string, unknown> {
+  const raw = err instanceof Error ? err.message : "Quota exceeded";
+  const retryAfter = getQuotaRetryAfter(raw);
+  return {
+    message: retryAfter
+      ? `Gemini free-tier limit hit. Please retry in ~${retryAfter}s. No credits were deducted.`
+      : "Gemini free-tier limit hit. Please wait a bit and try again. No credits were deducted.",
+    code: "QUOTA_EXCEEDED",
+    ...(retryAfter !== null ? { retryAfter } : {}),
+  };
+}
+
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
@@ -50,8 +78,27 @@ export async function POST(request: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      const enqueue = (chunk: string) =>
-        controller.enqueue(encoder.encode(chunk));
+      let closed = false;
+      const safeEnqueue = (chunk: string) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          closed = true;
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // already closed / cancelled — ignore
+        }
+      };
+
+      // If the client aborts (Stop button / navigation), stop enqueueing.
+      request.signal.addEventListener("abort", safeClose);
 
       // Accumulate file patches as the agent calls update_file
       const patchedFiles: Record<string, { code: string }> = {
@@ -80,7 +127,7 @@ export async function POST(request: NextRequest) {
         async execute({ path, code, reason }) {
           patchedFiles[path] = { code };
           // Emit live patch — client applies it to Sandpack immediately
-          enqueue(sseEvent("file_patch", { path, code, reason }));
+          safeEnqueue(sseEvent("file_patch", { path, code, reason }));
           return `Updated ${path}: ${reason}`;
         },
       });
@@ -120,7 +167,7 @@ export async function POST(request: NextRequest) {
         providerId: "gemini",
         modelId: "gemini-3.5-flash",
         apiKey: process.env.GEMINI_API_KEY!,
-        maxIterations: 8,
+        maxIterations: 5,
         systemPrompt: `You are an expert React developer improving a live browser preview app.
 
 The app uses React (functional components), Tailwind CSS for styling, and runs in Sandpack.
@@ -158,7 +205,7 @@ RULES:
 
         agent.subscribe((event) => {
           if (event.type === "assistant-text-delta" && event.text) {
-            enqueue(sseEvent("thinking", { text: event.text }));
+            safeEnqueue(sseEvent("thinking", { text: event.text }));
           }
 
           // This fires reliably every time a tool is called
@@ -167,11 +214,11 @@ RULES:
             if (name === "update_file") {
               const path =
                 (event.toolCall?.input as { path?: string })?.path ?? "a file";
-              enqueue(
+              safeEnqueue(
                 sseEvent("thinking", { text: `\n\nUpdating \`${path}\`…` })
               );
             } else if (name === "done_improving") {
-              enqueue(
+              safeEnqueue(
                 sseEvent("thinking", { text: "\n\nFinalizing improvements…" })
               );
             }
@@ -179,7 +226,7 @@ RULES:
         });
 
         // ── Run the agent ─────────────────────────────────────────────────
-        enqueue(sseEvent("status", { message: "Cline agent starting…" }));
+        safeEnqueue(sseEvent("status", { message: "Cline agent starting…" }));
 
         const result = await agent.run(userRequest);
 
@@ -213,7 +260,7 @@ RULES:
 
         // ── Final done event ──────────────────────────────────────────────
 
-        enqueue(
+        safeEnqueue(
           sseEvent("done", {
             fileData: newFileData,
             summary: finalSummary || result.outputText,
@@ -223,14 +270,18 @@ RULES:
         );
       } catch (err) {
         console.error("[improve] error:", err);
-        enqueue(
-          sseEvent("error", {
-            message:
-              err instanceof Error ? err.message : "Something went wrong.",
-          })
-        );
+        if (isQuotaError(err)) {
+          safeEnqueue(sseEvent("error", quotaErrorPayload(err)));
+        } else {
+          safeEnqueue(
+            sseEvent("error", {
+              message:
+                err instanceof Error ? err.message : "Something went wrong.",
+            })
+          );
+        }
       } finally {
-        controller.close();
+        safeClose();
       }
     },
   });

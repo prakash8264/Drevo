@@ -166,29 +166,54 @@ export function WorkspaceClient({
 
           for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
+            let event: {
+              type: string;
+              message?: string;
+              code?: string;
+              retryAfter?: number;
+              workspaceId?: string;
+              fileData?: FileData;
+              creditsRemaining?: number;
+              assistantMessage?: string;
+            };
             try {
-              const event = JSON.parse(line.slice(6));
-              if (event.type === "status") {
-                pushStep(event.message);
-              } else if (event.type === "done") {
-                completeSteps();
-                setWorkspaceId(event.workspaceId);
-                setFileData(event.fileData);
+              event = JSON.parse(line.slice(6));
+            } catch {
+              // skip malformed SSE lines
+              continue;
+            }
+            if (event.type === "status") {
+              pushStep(event.message ?? "Working…");
+            } else if (event.type === "done") {
+              completeSteps();
+              setWorkspaceId(event.workspaceId ?? null);
+              if (event.fileData) setFileData(event.fileData);
+              if (typeof event.creditsRemaining === "number")
                 setCredits(event.creditsRemaining);
-                setMessages((prev) => [
-                  ...prev,
-                  { role: "assistant", content: event.assistantMessage },
-                ]);
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: event.assistantMessage ?? "" },
+              ]);
+              if (event.workspaceId) {
                 window.history.replaceState(
                   null,
                   "",
                   `/workspace?id=${event.workspaceId}`
                 );
-              } else if (event.type === "error") {
-                throw new Error(event.message);
               }
-            } catch {
-              // skip malformed SSE lines
+            } else if (event.type === "error") {
+              const quotaMsg =
+                event.code === "QUOTA_EXCEEDED"
+                  ? event.message ??
+                    "Gemini free-tier limit hit. Please wait and retry."
+                  : event.message ?? "Generation failed";
+              const err = new Error(quotaMsg) as Error & {
+                code?: string;
+                retryAfter?: number;
+              };
+              err.code = event.code;
+              err.retryAfter = event.retryAfter;
+              throw err;
             }
           }
         }
@@ -199,8 +224,19 @@ export function WorkspaceClient({
           return;
         }
         console.error(err);
+        const code = (err as Error & { code?: string })?.code;
+        const retryAfter = (err as Error & { retryAfter?: number })?.retryAfter;
         toast.error(
-          err instanceof Error ? err.message : "Something went wrong."
+          err instanceof Error ? err.message : "Something went wrong.",
+          {
+            duration:
+              code === "QUOTA_EXCEEDED"
+                ? Math.min(
+                    15000,
+                    Math.max(8000, (retryAfter ?? 50) * 1000)
+                  )
+                : 5000,
+          }
         );
         setMessages((prev) => prev.slice(0, -1));
       } finally {
@@ -283,41 +319,65 @@ export function WorkspaceClient({
 
           for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
+            let event: {
+              type: string;
+              text?: string;
+              path?: string;
+              code?: string;
+              fileData?: FileData;
+              summary?: string;
+              creditsRemaining?: number;
+              message?: string;
+              retryAfter?: number;
+            };
             try {
-              const event = JSON.parse(line.slice(6));
-
-              if (event.type === "thinking") {
-                // Stream agent reasoning into the placeholder assistant message
-                accumulatedThinking += event.text;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = {
-                    role: "assistant",
-                    content: accumulatedThinking,
-                  };
-                  return updated;
-                });
-              } else if (event.type === "file_patch") {
-                // Accumulate locally — don't touch state yet
-                localPatches[event.path] = { code: event.code };
-              } else if (event.type === "done") {
-                // Apply all patches at once now that the stream is complete
-                setFileData(event.fileData);
-                setCredits(event.creditsRemaining);
-                // Replace thinking text with clean summary
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = {
-                    role: "assistant",
-                    content: event.summary,
-                  };
-                  return updated;
-                });
-              } else if (event.type === "error") {
-                throw new Error(event.message);
-              }
+              event = JSON.parse(line.slice(6));
             } catch {
               // skip malformed SSE lines
+              continue;
+            }
+
+            if (event.type === "thinking") {
+              // Stream agent reasoning into the placeholder assistant message
+              accumulatedThinking += event.text ?? "";
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  role: "assistant",
+                  content: accumulatedThinking,
+                };
+                return updated;
+              });
+            } else if (event.type === "file_patch") {
+              // Accumulate locally — don't touch state yet
+              if (event.path) localPatches[event.path] = { code: event.code as unknown as string };
+            } else if (event.type === "done") {
+              // Apply all patches at once now that the stream is complete
+              if (event.fileData) setFileData(event.fileData);
+              if (typeof event.creditsRemaining === "number")
+                setCredits(event.creditsRemaining);
+              // Replace thinking text with clean summary
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  role: "assistant",
+                  content: event.summary ?? "Done.",
+                };
+                return updated;
+              });
+            } else if (event.type === "error") {
+              const quotaMsg =
+                event.code === "QUOTA_EXCEEDED"
+                  ? event.message ??
+                    "Gemini free-tier limit hit. Please wait and retry. No credits were deducted."
+                  : event.message ?? "Improve failed";
+              const err = new Error(quotaMsg) as Error & {
+                code?: string;
+                retryAfter?: number;
+              };
+              err.code = event.code;
+              err.retryAfter = event.retryAfter;
+              throw err;
             }
           }
         }
@@ -327,7 +387,14 @@ export function WorkspaceClient({
           setMessages((prev) => prev.slice(0, -2));
           return;
         }
-        toast.error(err instanceof Error ? err.message : "Improve failed.");
+        const code = (err as Error & { code?: string })?.code;
+        const retryAfter = (err as Error & { retryAfter?: number })?.retryAfter;
+        toast.error(err instanceof Error ? err.message : "Improve failed.", {
+          duration:
+            code === "QUOTA_EXCEEDED"
+              ? Math.min(15000, Math.max(8000, (retryAfter ?? 50) * 1000))
+              : 5000,
+        });
         setMessages((prev) => prev.slice(0, -2));
       } finally {
         improveAbortRef.current = null;

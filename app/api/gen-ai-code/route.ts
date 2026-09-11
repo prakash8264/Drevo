@@ -14,6 +14,38 @@ function sseEvent(type: string, payload: unknown): string {
   return `data: ${JSON.stringify({ type, ...(payload as object) })}\n\n`;
 }
 
+// ─── Quota helpers ────────────────────────────────────────────────────────────
+// Detect Gemini free-tier / rate-limit errors so we can send a friendly SSE
+// error (with retryAfter) instead of leaking raw Google text.
+
+function getQuotaRetryAfter(message: string): number | null {
+  const m = message.match(/retry in ([\d.]+)s/i);
+  if (m) {
+    const secs = Math.ceil(parseFloat(m[1]));
+    return Number.isFinite(secs) ? secs : null;
+  }
+  return null;
+}
+
+function isQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /quota|exceed.*current quota|generate_content_free_tier|rate.limit|rate_limit|429|resource exhausted/i.test(
+    msg
+  );
+}
+
+function quotaErrorPayload(err: unknown): Record<string, unknown> {
+  const raw = err instanceof Error ? err.message : "Quota exceeded";
+  const retryAfter = getQuotaRetryAfter(raw);
+  return {
+    message: retryAfter
+      ? `Gemini free-tier limit hit. Please retry in ~${retryAfter}s. Consider upgrading your Gemini plan for higher limits.`
+      : "Gemini free-tier limit hit. Please wait a bit and try again. Consider upgrading your Gemini plan for higher limits.",
+    code: "QUOTA_EXCEEDED",
+    ...(retryAfter !== null ? { retryAfter } : {}),
+  };
+}
+
 // ─── Extract short label from a Gemini thought chunk ─────────────────────────
 // Gemini thoughts often start with a bold heading like **Verify Config**
 // We extract that. If no bold heading, take the first sentence only.
@@ -176,8 +208,27 @@ export async function POST(request: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      const enqueue = (chunk: string) =>
-        controller.enqueue(encoder.encode(chunk));
+      let closed = false;
+      const safeEnqueue = (chunk: string) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          closed = true;
+        }
+      };
+      const safeClose = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // already closed / cancelled — ignore
+        }
+      };
+
+      // If the client aborts (Stop button / navigation), stop enqueueing.
+      request.signal.addEventListener("abort", safeClose);
 
       try {
         const contents = buildContents(messages, fileData);
@@ -199,6 +250,7 @@ export async function POST(request: NextRequest) {
         let lastEmitTime = 0; // throttle thought emissions
 
         for await (const chunk of geminiStream) {
+          if (closed || request.signal.aborted) break;
           const parts = chunk.candidates?.[0]?.content?.parts ?? [];
 
           for (const part of parts) {
@@ -210,7 +262,7 @@ export async function POST(request: NextRequest) {
               if (now - lastEmitTime > 600) {
                 const label = extractThoughtLabel(part.text);
                 if (label) {
-                  enqueue(sseEvent("status", { message: label }));
+                  safeEnqueue(sseEvent("status", { message: label }));
                   lastEmitTime = now;
                 }
               }
@@ -220,6 +272,8 @@ export async function POST(request: NextRequest) {
             }
           }
         }
+
+        if (closed || request.signal.aborted) return;
 
         // ── Parse the complete JSON response ──────────────────────────────────
 
@@ -233,12 +287,11 @@ export async function POST(request: NextRequest) {
         try {
           parsed = JSON.parse(accumulated);
         } catch {
-          enqueue(
+          safeEnqueue(
             sseEvent("error", {
               message: "AI returned invalid JSON. Please try again.",
             })
           );
-          controller.close();
           return;
         }
 
@@ -250,18 +303,17 @@ export async function POST(request: NextRequest) {
         } = parsed;
 
         if (!files || typeof files !== "object") {
-          enqueue(
+          safeEnqueue(
             sseEvent("error", {
               message: "AI response missing files. Please try again.",
             })
           );
-          controller.close();
           return;
         }
 
         // ── Validate npm packages ──────────────────────────────────────────────
 
-        enqueue(sseEvent("status", { message: "Validating packages…" }));
+        safeEnqueue(sseEvent("status", { message: "Validating packages…" }));
         const validatedDeps = await validateDependencies(dependencies ?? {});
         const newFileData: FileData = {
           files,
@@ -271,7 +323,7 @@ export async function POST(request: NextRequest) {
 
         // ── Upsert workspace + deduct credit (single transaction) ──────────────
 
-        enqueue(sseEvent("status", { message: "Saving…" }));
+        safeEnqueue(sseEvent("status", { message: "Saving…" }));
 
         const lastUserMessage = messages[messages.length - 1];
         const updatedMessages: Message[] = [
@@ -309,7 +361,7 @@ export async function POST(request: NextRequest) {
 
         // ── Emit final result ──────────────────────────────────────────────────
 
-        enqueue(
+        safeEnqueue(
           sseEvent("done", {
             workspaceId: workspace.id,
             assistantMessage,
@@ -320,13 +372,17 @@ export async function POST(request: NextRequest) {
         );
       } catch (err) {
         console.error("[gen-ai-code] stream error:", err);
-        enqueue(
-          sseEvent("error", {
-            message: "Something went wrong. Please try again.",
-          })
-        );
+        if (isQuotaError(err)) {
+          safeEnqueue(sseEvent("error", quotaErrorPayload(err)));
+        } else {
+          safeEnqueue(
+            sseEvent("error", {
+              message: "Something went wrong. Please try again.",
+            })
+          );
+        }
       } finally {
-        controller.close();
+        safeClose();
       }
     },
   });
