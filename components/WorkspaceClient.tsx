@@ -26,7 +26,6 @@ interface WorkspaceClientProps {
   workspace: WorkspaceData | null;
   userCredits: number;
   userId: string;
-  userPlan: string;
 }
 
 function parseMessages(raw: unknown): Message[] {
@@ -49,7 +48,6 @@ export function WorkspaceClient({
   workspace,
   userCredits,
   userId,
-  userPlan,
 }: WorkspaceClientProps) {
   const [workspaceId, setWorkspaceId] = useState<string | null>(
     workspace?.id ?? null
@@ -245,13 +243,14 @@ export function WorkspaceClient({
         setStatusLog([]);
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [credits, isGenerating, userId]
     // fileData intentionally omitted — read via fileDataRef
+    [credits, isGenerating, userId]
   );
 
+  // Hybrid edit path — 2nd+ chat prompt, screenshot re-send, Fix-with-AI.
+  // First prompt (no workspace/fileData yet) still uses handleGenerate.
   const handleImprove = useCallback(
-    async (userRequest: string) => {
+    async (userRequest: string, imageUrl?: string) => {
       if (isGenerating || isImproving) return;
       if (credits < MIN_CREDITS_TO_GENERATE) return;
       if (!workspaceIdRef.current) return;
@@ -260,11 +259,18 @@ export function WorkspaceClient({
       const currentFileData = fileDataRef.current;
       if (!currentFileData) return;
 
+      const userMessage: Message = {
+        role: "user",
+        content: userRequest,
+        ...(imageUrl ? { imageUrl } : {}),
+      };
+      const conversationHistory = [...messagesRef.current, userMessage];
+
       setIsImproving(true);
 
       setMessages((prev) => [
         ...prev,
-        { role: "user", content: userRequest },
+        userMessage,
         { role: "assistant", content: "" }, // placeholder, updated live
       ]);
 
@@ -281,14 +287,14 @@ export function WorkspaceClient({
             userId,
             workspaceId: workspaceIdRef.current,
             userRequest,
+            ...(imageUrl ? { imageUrl } : {}),
+            messages: conversationHistory,
             fileData: currentFileData,
           }),
         });
 
         if (res.status === 403) {
-          toast.error(
-            "Upgrade to Starter or Pro to use Improve with Forge Agent."
-          );
+          toast.error("Something went wrong. Please try again.");
           setMessages((prev) => prev.slice(0, -2));
           return;
         }
@@ -326,6 +332,7 @@ export function WorkspaceClient({
               code?: string;
               fileData?: FileData;
               summary?: string;
+              partial?: boolean;
               creditsRemaining?: number;
               message?: string;
               retryAfter?: number;
@@ -365,6 +372,14 @@ export function WorkspaceClient({
                 };
                 return updated;
               });
+              // Budget ran out mid-overhaul but completed files were kept —
+              // make sure the user notices they can ask to continue.
+              if (event.partial) {
+                toast.info(
+                  "Partially applied — ask to continue with the rest.",
+                  { duration: 8000 }
+                );
+              }
             } else if (event.type === "error") {
               const quotaMsg =
                 event.code === "QUOTA_EXCEEDED"
@@ -393,7 +408,9 @@ export function WorkspaceClient({
           duration:
             code === "QUOTA_EXCEEDED"
               ? Math.min(15000, Math.max(8000, (retryAfter ?? 50) * 1000))
-              : 5000,
+              : code === "MAX_ITERATIONS"
+                ? 8000
+                : 5000,
         });
         setMessages((prev) => prev.slice(0, -2));
       } finally {
@@ -402,7 +419,6 @@ export function WorkspaceClient({
       }
     },
     // fileData intentionally omitted — read via fileDataRef above
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [credits, isGenerating, isImproving, userId]
   );
 
@@ -412,9 +428,25 @@ export function WorkspaceClient({
     improveAbortRef.current?.abort();
   }, []);
 
-  const handleFilePatch = useCallback((patches: FileData) => {
-    setFileData(patches);
-  }, []);
+  // Fix-with-AI goes through the agent when files exist (patch is safer
+  // than full regen for error fixes), else falls back to generation.
+  const handleFixError = useCallback(
+    (error: string) => {
+      const prompt = `There is an error in the preview:\n\n\`\`\`\n${error}\n\`\`\`\n\nPlease fix it.`;
+      if (workspaceIdRef.current && fileDataRef.current) {
+        return handleImprove(prompt);
+      }
+      return handleGenerate(prompt);
+    },
+    [handleGenerate, handleImprove]
+  );
+
+  // Hybrid routing: first prompt (no workspace/files yet) -> fast one-shot
+  // generation; every follow-up -> agent patch path. ChatPanel just calls
+  // whatever handler is current — it re-renders after workspaceId/fileData
+  // are set by the first generation's done event.
+  const onGenerate =
+    workspaceId && fileData ? handleImprove : handleGenerate;
 
   return (
     <>
@@ -432,7 +464,7 @@ export function WorkspaceClient({
           statusLog={statusLog}
           credits={credits}
           initialPrompt={initialPrompt}
-          onGenerate={handleGenerate}
+          onGenerate={onGenerate}
           onStop={handleStop}
           userId={userId}
           workspaceId={workspaceId}
@@ -443,16 +475,9 @@ export function WorkspaceClient({
           fileData={fileData}
           isGenerating={isGenerating}
           statusLog={statusLog}
-          onImprove={handleImprove}
-          onFixError={(error) =>
-            handleGenerate(
-              `There is an error in the preview:\n\n\`\`\`\n${error}\n\`\`\`\n\nPlease fix it.`
-            )
-          }
-          onFilePatch={handleFilePatch}
+          onFixError={handleFixError}
           appTitle={fileData?.title ?? workspace?.title ?? null}
           isImproving={isImproving}
-          isProUser={userPlan === "pro"}
         />
       </div>
     </>

@@ -29,7 +29,13 @@ export const PRICING_PLANS = [
     featured: false,
     planId: null,
     active: true,
-    features: ["10 generations / month", "Live preview", "Export to zip"],
+    features: [
+      "10 generations / month",
+      "Agent-powered edits",
+      "Image uploads",
+      "Live preview",
+      "Export to zip",
+    ],
   },
   {
     key: "starter",
@@ -41,6 +47,7 @@ export const PRICING_PLANS = [
     active: false,
     features: [
       "50 generations / month",
+      "Agent-powered edits",
       "Image uploads",
       "Live preview",
       "Export to zip",
@@ -57,10 +64,10 @@ export const PRICING_PLANS = [
     features: [
       "150 generations / month",
       "Priority AI (faster response)",
+      "Agent-powered edits",
       "Live preview",
       "Export to zip",
       "Image uploads",
-      "Access to Forge Pro Agent",
     ],
   },
 ] as const;
