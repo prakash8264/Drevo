@@ -4,7 +4,45 @@ import { Agent, createTool } from "@cline/sdk";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
-import type { FileData } from "@/types/workspace";
+import type { FileData, Message } from "@/types/workspace";
+
+// ─── Helpers (mirrors gen-ai-code for hybrid chat routing) ───────────────────
+
+function trimHistory(messages: Message[]): Message[] {
+  if (messages.length <= 10) return messages;
+  return [messages[0], ...messages.slice(-8)];
+}
+
+function buildConversationContext(messages: Message[]): string {
+  const trimmed = trimHistory(messages);
+  // Exclude the last user message — it arrives separately as userRequest.
+  const history = trimmed.slice(0, -1);
+  if (history.length === 0) return "";
+  return history
+    .map((m) =>
+      m.role === "user" ? `User: ${m.content}` : `Assistant: ${m.content}`
+    )
+    .join("\n");
+}
+
+async function validateDependencies(
+  deps: Record<string, string>
+): Promise<Record<string, string>> {
+  const valid: Record<string, string> = {};
+  await Promise.all(
+    Object.entries(deps).map(async ([pkg, version]) => {
+      try {
+        const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, {
+          signal: AbortSignal.timeout(1500),
+        });
+        if (res.ok) valid[pkg] = version;
+      } catch {
+        // silently skip hallucinated packages
+      }
+    })
+  );
+  return valid;
+}
 
 // ─── SSE helper ───────────────────────────────────────────────────────────────
 
@@ -40,6 +78,25 @@ function quotaErrorPayload(err: unknown): Record<string, unknown> {
   };
 }
 
+// ─── Max-iterations helpers ───────────────────────────────────────────────────
+// The agent loop caps model calls (maxIterations). A "UI overhaul" style
+// request spanning many files can exhaust the budget before done_improving
+// is called. That throws before the DB transaction, so nothing is saved
+// and no credit is deducted — we just need a friendly message.
+
+function isMaxIterationsError(message: string): boolean {
+  return /maxIterations|max.iterations|finishReason.*max_iterations|max_iterations/i.test(
+    message
+  );
+}
+
+class MaxIterationsError extends Error {
+  constructor() {
+    super("Agent runtime exceeded maxIterations");
+    this.name = "MaxIterationsError";
+  }
+}
+
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
@@ -48,14 +105,24 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { userId, workspaceId, userRequest, fileData } = body as {
-    userId: string;
-    workspaceId: string;
-    userRequest: string; // what the user wants improved
-    fileData: FileData;
-  };
+  const { userId, workspaceId, userRequest, imageUrl, messages, fileData } =
+    body as {
+      userId: string;
+      workspaceId: string;
+      userRequest: string; // what the user wants changed (2nd+ chat prompt)
+      imageUrl?: string; // optional screenshot / reference image
+      messages?: Message[]; // full conversation incl. new user message
+      fileData: FileData;
+    };
 
-  // ── Auth + credit check ────────────────────────────────────────────────────
+  if (!workspaceId || !userRequest?.trim() || !fileData?.files) {
+    return Response.json(
+      { message: "workspaceId, userRequest and fileData are required" },
+      { status: 400 }
+    );
+  }
+
+  // ── Auth + credit check (same 1 credit as generation, all plans) ──────────
 
   const user = await db.user.findUnique({
     where: { id: userId, clerkId },
@@ -64,10 +131,6 @@ export async function POST(request: NextRequest) {
 
   if (!user)
     return Response.json({ message: "User not found" }, { status: 404 });
-
-  // Pro-only gate
-  if (user.plan !== "pro")
-    return Response.json({ message: "Upgrade required" }, { status: 403 });
 
   if (user.credits < CREDIT_COST_PER_GENERATION)
     return Response.json({ message: "Insufficient credits" }, { status: 402 });
@@ -100,9 +163,12 @@ export async function POST(request: NextRequest) {
       // If the client aborts (Stop button / navigation), stop enqueueing.
       request.signal.addEventListener("abort", safeClose);
 
-      // Accumulate file patches as the agent calls update_file
+      // Accumulate file patches + new deps as the agent calls tools
       const patchedFiles: Record<string, { code: string }> = {
         ...fileData.files,
+      };
+      const patchedDependencies: Record<string, string> = {
+        ...fileData.dependencies,
       };
       let finalSummary = "";
 
@@ -132,20 +198,42 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      // ── Tool 2: done_improving ───────────────────────────────────────────
+      // ── Tool 2: add_dependency ───────────────────────────────────────────
+      // Lets the agent add an npm package when the edit needs one
+      // (e.g. framer-motion). Validated against npm registry before save.
+
+      const addDependencyTool = createTool({
+        name: "add_dependency",
+        description:
+          "Add an npm package the edited code needs. Only use packages that exist on npm.",
+        inputSchema: z.object({
+          package: z
+            .string()
+            .describe("npm package name, e.g. framer-motion"),
+          version: z
+            .string()
+            .default("latest")
+            .describe("Version range, default latest"),
+        }),
+        async execute({ package: pkg, version }) {
+          patchedDependencies[pkg] = version || "latest";
+          return `Added dependency ${pkg}@${version || "latest"}`;
+        },
+      });
+
+      // ── Tool 3: done_improving ───────────────────────────────────────────
       // Agent calls this when all files are updated.
       // lifecycle.completesRun: true tells the Cline SDK loop to stop
       // immediately after this tool runs instead of continuing iterations.
 
       const doneImprovingTool = createTool({
         name: "done_improving",
-        description:
-          "Call this when you have finished making all improvements.",
+        description: "Call this when you have finished making all changes.",
         inputSchema: z.object({
           summary: z
             .string()
             .describe(
-              "A short friendly summary of all the improvements you made (1-3 sentences)"
+              "A short friendly summary of all the changes you made (1-3 sentences)"
             ),
         }),
         lifecycle: { completesRun: true },
@@ -167,35 +255,123 @@ export async function POST(request: NextRequest) {
         providerId: "gemini",
         modelId: "gemini-3.5-flash",
         apiKey: process.env.GEMINI_API_KEY!,
-        maxIterations: 5,
-        systemPrompt: `You are an expert React developer improving a live browser preview app.
+        // 12 turns: UI improvements often touch 2-4 files (1 turn each)
+        // plus thinking turns. Simple edits still stop early via
+        // done_improving (completesRun), so this only costs more on
+        // genuinely complex edits.
+        maxIterations: 12,
+        // Require the completion tool: if the model tries to end its turn
+        // with plain text instead of calling done_improving, the runtime
+        // nudges it to continue instead of exiting early with no edits.
+        completionPolicy: {
+          requireCompletionTool: true,
+        },
+        systemPrompt: `You are an expert React developer editing a live browser preview app via chat.
 
 The app uses React (functional components), Tailwind CSS for styling, and runs in Sandpack.
-You CANNOT use TypeScript, CSS modules, or real npm install — only what's already available.
-Available packages: react, react-dom, tailwindcss (CDN), lucide-react, recharts, react-router-dom, framer-motion, date-fns, zod, react-hook-form.
+You CANNOT use TypeScript, CSS modules, or real npm install.
+Prefer packages already installed: ${Object.keys(patchedDependencies).join(", ") || "none"}.
+Available packages you may add via add_dependency: react, react-dom, tailwindcss (CDN), lucide-react, recharts, react-router-dom, framer-motion, date-fns, zod, react-hook-form.
 
 Here are the current files:
 
 ${fileContext}
 
-WORKFLOW:
-1. Understand what the user wants improved.
-2. Identify which files need to change.
-3. Call update_file for each file that needs changes (always include the COMPLETE file, not just the diff).
-4. Once all files are updated, call done_improving with a short summary.
+WORKFLOW (you have a limited number of steps — be efficient):
+1. Understand what the user wants changed (it may reference an attached screenshot URL or a preview error — treat image URLs as usable <img src> directly).
+2. Identify which files need to change — touch ONLY those files, as few as possible.
+3. Call update_file for EVERY file that needs changes IN A SINGLE TURN (batch them together, always include the COMPLETE file, not just the diff). If you need a new npm package, include add_dependency in that same batch.
+4. In the very next turn, call done_improving with a short summary. Do not add extra commentary turns.
 
 RULES:
 - Always write complete file contents — never partial snippets.
 - Keep all existing functionality unless asked to remove it.
 - The entry point is always /App.js with a default export.
-- All imports must reference files you've updated or packages in the available list above.`,
-        tools: [updateFileTool, doneImprovingTool],
-        // Auto-approve both tools — no human-in-the-loop needed in this context
+- All imports must reference files you've updated or packages in the available/installed list.
+- If the user message looks like a preview error + stack trace, fix the root cause, don't just hide it.`,
+        tools: [updateFileTool, addDependencyTool, doneImprovingTool],
+        // Auto-approve all tools — no human-in-the-loop needed in this context
         toolPolicies: {
           update_file: { autoApprove: true },
+          add_dependency: { autoApprove: true },
           done_improving: { autoApprove: true },
         },
       });
+
+      // ── Shared finish: validate deps + save messages/fileData + done ──
+      // Defined before try so both the success path and the catch
+      // (partial save on maxIterations) can use it. Both deduct 1 credit.
+
+      const buildMessagesWithImage = (): Message[] => {
+        const baseMessages: Message[] =
+          messages && messages.length > 0
+            ? messages
+            : [
+                {
+                  role: "user",
+                  content: userRequest,
+                  ...(imageUrl ? { imageUrl } : {}),
+                } as Message,
+              ];
+        // Ensure the user message carries the imageUrl for /projects + reloads
+        return baseMessages.map((m, i) =>
+          i === baseMessages.length - 1 && m.role === "user" && imageUrl
+            ? { ...m, imageUrl }
+            : m
+        );
+      };
+
+      const finishRun = async (summary: string, partial: boolean) => {
+        const validatedDeps =
+          await validateDependencies(patchedDependencies);
+        const newFileData: FileData = {
+          files: patchedFiles,
+          dependencies: validatedDeps,
+          title: fileData.title,
+        };
+        const updatedMessages: Message[] = [
+          ...buildMessagesWithImage(),
+          { role: "assistant", content: summary },
+        ];
+
+        await db.$transaction([
+          db.workspace.update({
+            where: { id: workspaceId, userId },
+            data: {
+              messages: updatedMessages as never,
+              fileData: newFileData as never,
+            },
+          }),
+          db.user.update({
+            where: { id: userId },
+            data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
+          }),
+        ]);
+
+        const updatedUser = await db.user.findUnique({
+          where: { id: userId },
+          select: { credits: true },
+        });
+
+        // ── Final done event ────────────────────────────────────────────
+
+        safeEnqueue(
+          sseEvent("done", {
+            fileData: newFileData,
+            summary,
+            partial,
+            creditsRemaining:
+              updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
+          })
+        );
+      };
+
+      // Which files actually changed vs what the run started with?
+      // (covers edited paths and newly added ones)
+      const getChangedPaths = (): string[] =>
+        Object.keys(patchedFiles).filter(
+          (p) => patchedFiles[p]?.code !== fileData.files[p]?.code
+        );
 
       try {
         // ── Stream agent reasoning to chat panel ─────────────────────────
@@ -217,61 +393,94 @@ RULES:
               safeEnqueue(
                 sseEvent("thinking", { text: `\n\nUpdating \`${path}\`…` })
               );
+            } else if (name === "add_dependency") {
+              const pkg =
+                (event.toolCall?.input as { package?: string })?.package ??
+                "a package";
+              safeEnqueue(
+                sseEvent("thinking", { text: `\n\nAdding \`${pkg}\`…` })
+              );
             } else if (name === "done_improving") {
               safeEnqueue(
-                sseEvent("thinking", { text: "\n\nFinalizing improvements…" })
+                sseEvent("thinking", { text: "\n\nFinalizing changes…" })
               );
             }
           }
         });
 
         // ── Run the agent ─────────────────────────────────────────────────
-        safeEnqueue(sseEvent("status", { message: "Cline agent starting…" }));
+        safeEnqueue(sseEvent("status", { message: "Agent working…" }));
 
-        const result = await agent.run(userRequest);
+        // Build full agent input: history + image ref + current request.
+        // This is the hybrid edit path — file context is already in the
+        // system prompt, so here we give conversation + intent.
+        const conversationContext =
+          messages?.length //
+            ? buildConversationContext(messages)
+            : "";
+        const imageNote = imageUrl
+          ? `[The user attached an image/screenshot. Use this URL directly in the app where relevant (as img src, background-image, etc.), and treat it as a visual reference for the requested change: ${imageUrl}]\n\n`
+          : "";
+        const historyBlock = conversationContext
+          ? `Recent conversation for context:\n${conversationContext}\n\n`
+          : "";
+        const agentInput = `${imageNote}${historyBlock}User request: ${userRequest}`;
+
+        const result = await agent.run(agentInput);
 
         if (result.status === "failed") {
-          throw new Error(result.error?.message ?? "Agent run failed");
+          const rawMessage =
+            result.error?.message ?? "Agent run failed";
+          // Iteration budget exhausted — the request was too large to
+          // finish (e.g. UI overhaul across many files). The catch below
+          // partial-saves any completed file updates (1 credit), or sends
+          // a free friendly error when nothing changed.
+          if (isMaxIterationsError(rawMessage)) {
+            throw new MaxIterationsError();
+          }
+          throw new Error(rawMessage);
         }
 
-        // ── Deduct credit + save to DB ────────────────────────────────────
-
-        const newFileData: FileData = {
-          files: patchedFiles,
-          dependencies: fileData.dependencies,
-          title: fileData.title,
-        };
-
-        await db.$transaction([
-          db.workspace.update({
-            where: { id: workspaceId, userId },
-            data: { fileData: newFileData as never },
-          }),
-          db.user.update({
-            where: { id: userId },
-            data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
-          }),
-        ]);
-
-        const updatedUser = await db.user.findUnique({
-          where: { id: userId },
-          select: { credits: true },
-        });
-
-        // ── Final done event ──────────────────────────────────────────────
-
-        safeEnqueue(
-          sseEvent("done", {
-            fileData: newFileData,
-            summary: finalSummary || result.outputText,
-            creditsRemaining:
-              updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
-          })
-        );
+        await finishRun(finalSummary || result.outputText || "Done.", false);
       } catch (err) {
         console.error("[improve] error:", err);
         if (isQuotaError(err)) {
           safeEnqueue(sseEvent("error", quotaErrorPayload(err)));
+        } else if (err instanceof MaxIterationsError) {
+          // Budget exhausted. If the agent already completed file updates,
+          // keep them (partial save, 1 credit deducted like a normal run)
+          // so the user can ask to continue instead of starting over.
+          // If nothing changed, fall through to the free friendly error.
+          const changedPaths = getChangedPaths();
+          const depsChanged =
+            JSON.stringify(patchedDependencies) !==
+            JSON.stringify(fileData.dependencies);
+          if (changedPaths.length > 0 || depsChanged) {
+            try {
+              const partialNote =
+                `I applied part of your request before running out of steps. Updated: ${changedPaths.length > 0 ? changedPaths.map((p) => `\`${p}\``).join(", ") : "dependencies"}. ` +
+                "Ask me to continue with the rest. If the preview shows errors, that's expected mid-overhaul — ask me to continue or use Fix with AI." +
+                (finalSummary ? `\n\nProgress so far: ${finalSummary}` : "");
+              await finishRun(partialNote, true);
+            } catch (saveErr) {
+              console.error("[improve] partial save failed:", saveErr);
+              safeEnqueue(
+                sseEvent("error", {
+                  message:
+                    "This edit was too large to finish in one go. Try a smaller, more specific request (one section at a time). No credits were deducted.",
+                  code: "MAX_ITERATIONS",
+                })
+              );
+            }
+          } else {
+            safeEnqueue(
+              sseEvent("error", {
+                message:
+                  "This edit was too large to finish in one go. Try a smaller, more specific request (one section at a time). No credits were deducted.",
+                code: "MAX_ITERATIONS",
+              })
+            );
+          }
         } else {
           safeEnqueue(
             sseEvent("error", {
