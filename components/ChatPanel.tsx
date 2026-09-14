@@ -10,14 +10,18 @@ import {
   Sparkles,
   Wand2,
   Square,
+  Copy,
+  Pencil,
+  RotateCcw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
 import { PricingModal } from "@/components/PricingModal";
 import type { Message, StatusStep } from "@/types/workspace";
 import { createClient } from "@supabase/supabase-js";
-import { BlueTitle } from "./reusables";
+import { BrandTitle } from "./reusables";
 import Image from "next/image";
 
 const supabase = createClient(
@@ -33,10 +37,13 @@ interface ChatPanelProps {
   credits: number;
   initialPrompt: string | null;
   onGenerate: (prompt: string, imageUrl?: string) => Promise<void>;
+  onRegenerate: () => void;
+  onEditMessage: (index: number, content: string) => void;
   onStop: () => void;
   userId: string;
   workspaceId: string | null;
   appTitle: string | null;
+  width?: number;
 }
 
 export function ChatPanel({
@@ -47,10 +54,13 @@ export function ChatPanel({
   credits,
   initialPrompt,
   onGenerate,
+  onRegenerate,
+  onEditMessage,
   onStop,
   userId,
   workspaceId,
   appTitle,
+  width,
 }: ChatPanelProps) {
   const { user } = useUser();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -60,9 +70,28 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const [pendingImageUrl, setPendingImageUrl] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
 
   const hasAutoSubmittedRef = useRef(false);
   const noCredits = credits <= 0;
+  const isBusy = isGenerating || isImproving;
+
+  const handleCopy = async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      toast.success("Copied to clipboard.");
+    } catch {
+      toast.error("Copy failed. Please try again.");
+    }
+  };
+
+  const handleEditSave = (index: number) => {
+    if (!editDraft.trim() || isBusy) return;
+    onEditMessage(index, editDraft);
+    setEditingIndex(null);
+    setEditDraft("");
+  };
 
   // The last message is the live-streaming assistant placeholder during improve
   const lastMsg = messages[messages.length - 1];
@@ -133,10 +162,13 @@ export function ChatPanel({
     input.trim().length > 0 && !isGenerating && !isImproving && !noCredits;
 
   return (
-    <div className="flex w-[320px] shrink-0 flex-col bg-[#0d0d0d]">
+    <div
+      className="flex h-full shrink-0 flex-col bg-[#0d0d0d]"
+      style={{ width: width ?? 320 }}
+    >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-white/6 px-2 py-3">
-        <BlueTitle>{appTitle}</BlueTitle>
+        <BrandTitle>{appTitle}</BrandTitle>
         <PricingModal reason={noCredits ? "credits" : "upgrade"}>
           <span
             className={cn(
@@ -175,7 +207,7 @@ export function ChatPanel({
             return (
               <div key={i}>
                 {msg.role === "user" ? (
-                  <div className="flex items-start justify-end gap-2">
+                  <div className="group flex items-start justify-end gap-2">
                     <div className="max-w-[85%] space-y-1.5">
                       {msg.imageUrl && (
                         // eslint-disable-next-line @next/next/no-img-element
@@ -185,11 +217,56 @@ export function ChatPanel({
                           className="max-h-40 w-full rounded-lg object-cover"
                         />
                       )}
-                      <div className="rounded-2xl rounded-br-sm bg-white/10 px-3.5 py-2.5">
-                        <p className="text-[13px] leading-relaxed text-white/80 wrap-break-word">
-                          {msg.content}
-                        </p>
-                      </div>
+                      {editingIndex === i ? (
+                        <div className="rounded-2xl rounded-br-sm border border-violet-500/30 bg-white/10 p-2">
+                          <textarea
+                            autoFocus
+                            value={editDraft}
+                            onChange={(e) => setEditDraft(e.target.value)}
+                            rows={3}
+                            className="w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed text-white/80 focus:outline-none"
+                          />
+                          <div className="flex justify-end gap-1.5 px-1 pb-1">
+                            <button
+                              onClick={() => {
+                                setEditingIndex(null);
+                                setEditDraft("");
+                              }}
+                              className="rounded-md px-2 py-1 text-[11px] text-white/40 hover:bg-white/10 hover:text-white/70"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => handleEditSave(i)}
+                              disabled={!editDraft.trim() || isBusy}
+                              className="rounded-md bg-white px-2 py-1 text-[11px] font-semibold text-black hover:bg-white/90 disabled:opacity-40"
+                            >
+                              Resend
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-2xl rounded-br-sm bg-white/10 px-3.5 py-2.5">
+                          <p className="text-[13px] leading-relaxed text-white/80 wrap-break-word">
+                            {msg.content}
+                          </p>
+                        </div>
+                      )}
+                      {!isBusy && editingIndex !== i && (
+                        <div className="flex justify-end opacity-0 transition-opacity group-hover:opacity-100">
+                          <button
+                            title="Edit and resend"
+                            onClick={() => {
+                              setEditingIndex(i);
+                              setEditDraft(msg.content);
+                            }}
+                            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-white/30 hover:bg-white/10 hover:text-white/60"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            Edit
+                          </button>
+                        </div>
+                      )}
                     </div>
                     {user?.imageUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -205,19 +282,19 @@ export function ChatPanel({
                     )}
                   </div>
                 ) : (
-                  <div className="flex items-start gap-2">
+                  <div className="group flex items-start gap-2">
                     <Image
-                      src="/logo-short.jpeg"
-                      alt="Forge"
+                      src="/logo-short.svg"
+                      alt="Drevo"
                       width={24}
                       height={24}
                       className="mt-0.5 h-6 w-6 shrink-0 rounded-md"
                     />
-                    <div className="min-w-0 rounded-2xl rounded-tl-sm bg-white/5 px-3.5 py-2.5">
+                    <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm bg-white/5 px-3.5 py-2.5">
                       {isLiveStream && !msg.content ? (
                         // Empty placeholder — show thinking indicator
                         <div className="flex items-center gap-2">
-                          <Wand2 className="h-3 w-3 shrink-0 text-blue-400/60 animate-pulse" />
+                          <Wand2 className="h-3 w-3 shrink-0 text-violet-400/60 animate-pulse" />
                           <span className="text-[12px] text-white/30 animate-pulse">
                             Thinking…
                           </span>
@@ -227,20 +304,43 @@ export function ChatPanel({
                         // with a blinking cursor at the end
                         <div>
                           <div className="mb-1.5 flex items-center gap-1.5">
-                            <Wand2 className="h-3 w-3 shrink-0 text-blue-400/60" />
-                            <span className="text-[10px] font-medium uppercase tracking-wider text-blue-400/50">
+                            <Wand2 className="h-3 w-3 shrink-0 text-violet-400/60" />
+                            <span className="text-[10px] font-medium uppercase tracking-wider text-violet-400/50">
                               Reasoning
                             </span>
                           </div>
                           <p className="text-[12px] leading-relaxed text-white/35 wrap-break-word">
                             {msg.content}
-                            <span className="ml-0.5 inline-block h-3 w-0.5 animate-[blink_1s_ease-in-out_infinite] bg-blue-400/60 align-middle" />
+                            <span className="ml-0.5 inline-block h-3 w-0.5 animate-[blink_1s_ease-in-out_infinite] bg-violet-400/60 align-middle" />
                           </p>
                         </div>
                       ) : (
                         // Normal completed assistant message
-                        <div className="prose prose-sm prose-invert max-w-none wrap-break-word text-[13px] leading-relaxed text-white/70 [&_code]:rounded [&_code]:bg-white/10 [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-blue-300/80 [&_code]:text-xs [&_code]:break-all [&_li]:my-0.5 [&_p]:my-1 [&_pre]:overflow-x-auto! [&_pre]:whitespace-pre-wrap! [&_ul]:my-1">
+                        <div className="prose prose-sm prose-invert max-w-none wrap-break-word text-[13px] leading-relaxed text-white/70 [&_code]:rounded [&_code]:bg-white/10 [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-violet-300/80 [&_code]:text-xs [&_code]:break-all [&_li]:my-0.5 [&_p]:my-1 [&_pre]:overflow-x-auto! [&_pre]:whitespace-pre-wrap! [&_ul]:my-1">
                           <ReactMarkdown>{msg.content}</ReactMarkdown>
+                        </div>
+                      )}
+                      {!isLiveStream && msg.content && !isBusy && (
+                        <div className="mt-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                          <button
+                            title="Copy response"
+                            onClick={() => handleCopy(msg.content)}
+                            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-white/30 hover:bg-white/10 hover:text-white/60"
+                          >
+                            <Copy className="h-3 w-3" />
+                            Copy
+                          </button>
+                          {isLast && (
+                            <button
+                              title="Regenerate response (1 credit)"
+                              disabled={noCredits}
+                              onClick={onRegenerate}
+                              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-white/30 hover:bg-white/10 hover:text-white/60 disabled:opacity-40"
+                            >
+                              <RotateCcw className="h-3 w-3" />
+                              Regenerate
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -254,8 +354,8 @@ export function ChatPanel({
           {isGenerating && (
             <div className="flex items-start gap-2">
               <Image
-                src="/logo-short.jpeg"
-                alt="Forge"
+                src="/logo-short.svg"
+                alt="Drevo"
                 width={24}
                 height={24}
                 className="mt-0.5 h-6 w-6 shrink-0 rounded-md"
@@ -266,7 +366,7 @@ export function ChatPanel({
                     <div key={i} className="flex items-center gap-2.5">
                       <div className="flex h-4 w-4 shrink-0 items-center justify-center">
                         {step.status === "running" ? (
-                          <Loader2 className="h-3 w-3 animate-spin text-blue-400/80" />
+                          <Loader2 className="h-3 w-3 animate-spin text-violet-400/80" />
                         ) : (
                           <svg
                             className="h-3 w-3 text-white/25"

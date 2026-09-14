@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth, SignInButton } from "@clerk/nextjs";
 import { CheckoutButton } from "@clerk/nextjs/experimental";
@@ -12,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { FEATURES, PLACEHOLDERS, STEPS, SUGGESTIONS } from "@/lib/data";
 import { PRICING_PLANS } from "@/lib/constants";
 import {
-  BlueTitle,
+  BrandTitle,
   GrayTitle,
   SectionHeading,
   SectionLabel,
@@ -80,13 +82,13 @@ export default function LandingPage() {
         </Badge>
 
         <h1 className="mx-auto max-w-3xl text-balance font-serif text-5xl leading-tight tracking-tight sm:text-6xl lg:text-7xl z-10">
-          <GrayTitle>Forge your dream</GrayTitle>
+          <GrayTitle>Dream it.</GrayTitle>
           <br />
-          <BlueTitle>from a single prompt.</BlueTitle>
+          <BrandTitle>Develop it.</BrandTitle>
         </h1>
 
         <p className="mx-auto mt-6 max-w-xl text-balance text-base leading-relaxed text-white/40 z-10">
-          Describe what you want to build. AI writes the code, picks the
+          Describe what you want to build. Drevo writes the code, picks the
           packages, and renders a live preview all inside your browser.
         </p>
 
@@ -167,7 +169,7 @@ export default function LandingPage() {
             </div>
 
             <div className="mx-auto flex h-6 w-64 items-center justify-center rounded-md bg-white/5 px-3">
-              <span className="text-xs text-white/25">forge.app/workspace</span>
+              <span className="text-xs text-white/25">drevo.app/workspace</span>
             </div>
           </div>
 
@@ -198,7 +200,7 @@ export default function LandingPage() {
                     <p className="text-xs text-white/60">
                       I&apos;ll build a Kanban board with Todo, In Progress, and
                       Done columns. I&apos;ll use{" "}
-                      <code className="text-blue-400/80">@dnd-kit/core</code>{" "}
+                      <code className="text-violet-400/80">@dnd-kit/core</code>{" "}
                       for smooth drag-and-drop…
                     </p>
                   </div>
@@ -232,7 +234,7 @@ export default function LandingPage() {
 
             <div className="flex flex-1 flex-col">
               <div className="flex items-center gap-1 border-b border-white/6 px-4">
-                <button className="border-b-2 border-blue-400 px-3 py-2.5 text-xs text-white">
+                <button className="border-b-2 border-violet-400 px-3 py-2.5 text-xs text-white">
                   Preview
                 </button>
                 <button className="px-3 py-2.5 text-xs text-white/30">
@@ -277,7 +279,7 @@ export default function LandingPage() {
       <section className="px-4 pb-32">
         <div className="mx-auto mb-14 max-w-5xl text-center">
           <SectionLabel>Everything you need</SectionLabel>
-          <SectionHeading gray="From prompt" blue="to production." />
+          <SectionHeading gray="From prompt" brand="to production." />
         </div>
 
         <div className="mx-auto grid max-w-5xl grid-cols-1 gap-px overflow-hidden rounded-2xl border border-white/6 bg-white/6 sm:grid-cols-2 lg:grid-cols-3">
@@ -287,7 +289,7 @@ export default function LandingPage() {
               className="group bg-[#0a0a0a] p-7 hover:bg-[#0f0f0f]"
             >
               <div className="mb-4 flex h-9 w-9 items-center justify-center rounded-lg border border-white/8 bg-white/4 group-hover:border-white/15 group-hover:bg-white/8">
-                <Icon className="h-4 w-4 text-white/60 group-hover:text-blue-400/70" />
+                <Icon className="h-4 w-4 text-white/60 group-hover:text-violet-400/70" />
               </div>
               <p className="mb-2 text-sm font-semibold">{label}</p>
               <p className="text-sm leading-relaxed text-white/40">{desc}</p>
@@ -300,7 +302,7 @@ export default function LandingPage() {
       <section className="px-4 pb-32">
         <div className="mx-auto mb-14 max-w-3xl text-center">
           <SectionLabel>How it works</SectionLabel>
-          <SectionHeading gray="Four steps" blue="to a working app." />
+          <SectionHeading gray="Four steps" brand="to a working app." />
         </div>
 
         <div className="mx-auto max-w-3xl">
@@ -333,10 +335,10 @@ export default function LandingPage() {
       </section>
 
       {/* PRICING */}
-      <section className="px-4 pb-32">
+      <section id="pricing" className="px-4 pb-32 scroll-mt-20">
         <div className="mx-auto mb-14 max-w-5xl text-center">
           <SectionLabel>Simple pricing</SectionLabel>
-          <SectionHeading gray="Start free," blue="scale when ready." />
+          <SectionHeading gray="Start free," brand="scale when ready." />
 
           <p className="mx-auto mt-4 max-w-sm text-sm text-white/35">
             No credit card required. Upgrade or downgrade anytime.
@@ -371,14 +373,14 @@ export default function LandingPage() {
                 className={cn(
                   "relative flex flex-col rounded-2xl border p-7 transition-colors",
                   plan.featured
-                    ? "border-blue-500/25 bg-blue-500/4"
+                    ? "border-violet-500/25 bg-violet-500/4"
                     : "border-white/8 bg-[#0f0f0f]"
                 )}
               >
                 {/* Most popular pill */}
                 {plan.featured && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                    <span className="rounded-full border border-blue-500/20 bg-[#0a0a0a] px-3 py-1 text-[11px] font-medium text-blue-400">
+                    <span className="rounded-full border border-violet-500/20 bg-[#0a0a0a] px-3 py-1 text-[11px] font-medium text-violet-400">
                       Most popular
                     </span>
                   </div>
@@ -390,7 +392,7 @@ export default function LandingPage() {
                     {plan.label}
                   </p>
                   {isActive && (
-                    <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-400">
+                    <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-[10px] font-medium text-violet-400">
                       Active
                     </span>
                   )}
@@ -407,7 +409,7 @@ export default function LandingPage() {
                     {plan.price === 0 ? (
                       <GrayTitle>$0</GrayTitle>
                     ) : (
-                      <BlueTitle>${plan.price}</BlueTitle>
+                      <BrandTitle>${plan.price}</BrandTitle>
                     )}
                   </span>
                   {plan.price > 0 && (
@@ -425,13 +427,13 @@ export default function LandingPage() {
                       <div
                         className={cn(
                           "flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
-                          plan.featured ? "bg-blue-500/15" : "bg-white/8"
+                          plan.featured ? "bg-violet-500/15" : "bg-white/8"
                         )}
                       >
                         <Check
                           className={cn(
                             "h-2.5 w-2.5",
-                            plan.featured ? "text-blue-400" : "text-white/50"
+                            plan.featured ? "text-violet-400" : "text-white/50"
                           )}
                         />
                       </div>
@@ -488,7 +490,7 @@ export default function LandingPage() {
                         className={cn(
                           "w-full rounded-full text-sm font-semibold transition-all",
                           plan.featured
-                            ? "bg-blue-500 text-white hover:bg-blue-400 active:scale-95"
+                            ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
                             : "border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
                         )}
                         variant="ghost"
@@ -503,7 +505,7 @@ export default function LandingPage() {
                         className={cn(
                           "w-full rounded-full text-sm font-semibold transition-all",
                           plan.featured
-                            ? "bg-blue-500 text-white hover:bg-blue-400 active:scale-95"
+                            ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
                             : "border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
                         )}
                         variant="ghost"
@@ -526,7 +528,7 @@ export default function LandingPage() {
           strokeColor="rgba(255,255,255,0.05)" // blur
           numberOfLines={36}
           numberOfDiscs={36}
-          particleRGBColor={[147, 197, 253]}
+          particleRGBColor={[196, 181, 253]}
           className="absolute inset-0 h-full w-full"
           style={{
             maskImage:
@@ -536,7 +538,7 @@ export default function LandingPage() {
           }}
         />
 
-        <SectionHeading gray="Start building," blue="for free." />
+        <SectionHeading gray="Start building," brand="for free." />
 
         <p className="mb-8 text-sm leading-relaxed text-white/40">
           Get 10 free generations on sign up. No credit card required.
@@ -555,8 +557,48 @@ export default function LandingPage() {
         </SignInButton>
       </section>
 
-      <footer className="relative z-10 border-t border-white/7 py-12 mx-auto px-6 flex flex-wrap items-center justify-center text-stone-400">
-        Made with ❤️ by RoadsideCoder
+      <footer className="relative z-10 border-t border-white/7 px-6 py-12">
+        <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-8 sm:flex-row sm:items-start">
+          <div className="flex flex-col items-center gap-3 sm:items-start">
+            <Link href="/" className="flex items-center gap-2 select-none">
+              <Image
+                src="/logo.svg"
+                alt="Drevo"
+                width={120}
+                height={34}
+                className="h-7 w-auto"
+              />
+            </Link>
+            <p className="text-xs text-white/30">
+              Dream it. Develop it.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-6 text-[13px] text-white/40">
+            <Link
+              href="/projects"
+              className="transition-colors hover:text-white/80"
+            >
+              Projects
+            </Link>
+            <Link
+              href="#pricing"
+              className="transition-colors hover:text-white/80"
+            >
+              Pricing
+            </Link>
+            <Link
+              href="/workspace"
+              className="transition-colors hover:text-white/80"
+            >
+              Workspace
+            </Link>
+          </div>
+        </div>
+
+        <p className="mx-auto mt-10 max-w-5xl text-center text-xs text-white/20 sm:text-left">
+          © 2026 Drevo. All rights reserved.
+        </p>
       </footer>
     </main>
   );

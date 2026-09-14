@@ -11,7 +11,6 @@ import {
   SandpackFileExplorer,
   useSandpack,
 } from "@codesandbox/sandpack-react";
-import { dracula } from "@codesandbox/sandpack-themes";
 import {
   Eye,
   Code2,
@@ -19,12 +18,20 @@ import {
   AlertTriangle,
   Bot,
   Loader2,
+  History,
+  Maximize2,
+  Minimize2,
+  Monitor,
+  Smartphone,
+  X,
 } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 import { RingLoader } from "react-spinners";
 import JSZip from "jszip";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import type { FileData, StatusStep } from "@/types/workspace";
+import type { VersionSummary } from "@/types/version";
 
 // ─── Placeholder ──────────────────────────────────────────────────────────────
 
@@ -78,6 +85,8 @@ const BASE_DEPENDENCIES: Record<string, string> = {
 
 type ActiveTab = "preview" | "code";
 
+type PreviewDevice = "desktop" | "mobile";
+
 interface CodePanelProps {
   fileData: FileData | null;
   isGenerating: boolean;
@@ -85,6 +94,11 @@ interface CodePanelProps {
   onFixError: (error: string) => Promise<void>;
   appTitle: string | null;
   isImproving: boolean;
+  versions: VersionSummary[];
+  versionsLoading: boolean;
+  onRestoreVersion: (versionId: string) => Promise<void>;
+  focusMode: boolean;
+  onToggleFocusMode: () => void;
 }
 
 // ─── SandpackInner ────────────────────────────────────────────────────────────
@@ -101,6 +115,13 @@ function SandpackInner({
   fileData,
   appTitle,
   isImproving,
+  versions,
+  versionsLoading,
+  onRestoreVersion,
+  focusMode,
+  onToggleFocusMode,
+  device,
+  setDevice,
 }: {
   isGenerating: boolean;
   statusLog: StatusStep[];
@@ -110,11 +131,21 @@ function SandpackInner({
   fileData: FileData | null;
   appTitle: string | null;
   isImproving: boolean;
+  versions: VersionSummary[];
+  versionsLoading: boolean;
+  onRestoreVersion: (versionId: string) => Promise<void>;
+  focusMode: boolean;
+  onToggleFocusMode: () => void;
+  device: PreviewDevice;
+  setDevice: (d: PreviewDevice) => void;
 }) {
   const { sandpack, listen } = useSandpack();
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
+  const isBusy = isGenerating || isImproving;
 
   // Push file content updates into Sandpack without remounting.
   // This runs whenever fileData changes (e.g. after improve completes).
@@ -167,6 +198,16 @@ function SandpackInner({
     if (isGenerating) setPreviewError(null);
   }, [isGenerating]);
 
+  // Close version history on Escape
+  useEffect(() => {
+    if (!showHistory) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowHistory(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showHistory]);
+
   // ── Export to ZIP ──────────────────────────────────────────────────────────
   const handleExportZip = async () => {
     if (isExporting) return;
@@ -185,7 +226,7 @@ function SandpackInner({
       const zip = new JSZip();
 
       const packageJson = {
-        name: "forge-app",
+        name: "drevo-app",
         version: "1.0.0",
         private: true,
         dependencies: {
@@ -212,7 +253,7 @@ function SandpackInner({
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Forge App</title>
+    <title>Drevo App</title>
     <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body>
@@ -244,7 +285,7 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
 
       zip.file(
         "README.md",
-        `# Forge App\n\nGenerated with [Forge](https://forge.app).\n\n## Getting started\n\n\`\`\`bash\nnpm install\nnpm start\n\`\`\``
+        `# Drevo App\n\nGenerated with [Drevo](https://drevo.app).\n\n## Getting started\n\n\`\`\`bash\nnpm install\nnpm start\n\`\`\``
       );
 
       const blob = await zip.generateAsync({ type: "blob" });
@@ -256,7 +297,7 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, "-")
             .replace(/^-|-$/g, "")}.zip`
-        : "forge-app.zip";
+        : "drevo-app.zip";
       a.download = zipName;
       a.click();
       URL.revokeObjectURL(url);
@@ -293,12 +334,119 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
         </TabsList>
 
         <div className="flex items-center gap-1.5">
-          {isImproving && (
-            <span className="flex h-7 items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 text-xs text-white/50">
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400" />
-              Applying agent edits…
-            </span>
-          )}
+          {/* ── Version history ── */}
+          <div className="relative">
+            <button
+              onClick={() => setShowHistory((v) => !v)}
+              title="Version history"
+              className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs text-white/60 transition-colors hover:bg-white/6 hover:text-white/90"
+            >
+              <History className="h-3.5 w-3.5" />
+              {versions.length > 0 && (
+                <span className="rounded-sm bg-white/10 px-1 text-[10px] leading-4">
+                  {versions.length}
+                </span>
+              )}
+            </button>
+
+            {showHistory && (
+              <div className="absolute right-0 top-8 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-[#111111] shadow-2xl shadow-black/60">
+                <div className="flex items-center justify-between border-b border-white/6 px-3 py-2">
+                  <p className="text-xs font-semibold text-white/70">
+                    Version history
+                  </p>
+                  <button
+                    onClick={() => setShowHistory(false)}
+                    className="rounded p-0.5 text-white/30 hover:bg-white/10 hover:text-white/60"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                <div className="max-h-80 overflow-y-auto p-1.5">
+                  {versionsLoading ? (
+                    <p className="px-2.5 py-4 text-center text-xs text-white/30">
+                      Loading…
+                    </p>
+                  ) : versions.length === 0 ? (
+                    <p className="px-2.5 py-4 text-center text-xs text-white/30">
+                      No versions yet. Each AI edit saves one here.
+                    </p>
+                  ) : (
+                    versions.map((v) => (
+                      <div
+                        key={v.id}
+                        className="rounded-lg px-2.5 py-2 hover:bg-white/5"
+                      >
+                        <p className="line-clamp-2 text-xs leading-relaxed text-white/75">
+                          {v.summary ?? "Untitled version"}
+                        </p>
+                        <div className="mt-1 flex items-center justify-between">
+                          <span className="text-[11px] text-white/30">
+                            {formatDistanceToNow(new Date(v.createdAt), {
+                              addSuffix: true,
+                            })}{" "}
+                            · {v.fileCount} file
+                            {v.fileCount === 1 ? "" : "s"}
+                          </span>
+                          <button
+                            disabled={isBusy || restoringId !== null}
+                            onClick={async () => {
+                              setRestoringId(v.id);
+                              await onRestoreVersion(v.id);
+                              setRestoringId(null);
+                              setShowHistory(false);
+                            }}
+                            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-violet-300 hover:bg-violet-500/15 disabled:opacity-40"
+                          >
+                            {restoringId === v.id && (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            )}
+                            Restore
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <p className="border-t border-white/6 px-3 py-2 text-[10px] text-white/25">
+                  Restoring is free and reversible.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* ── Device toggle ── */}
+          <div className="flex items-center rounded-md border border-white/10 p-0.5">
+            <button
+              onClick={() => setDevice("desktop")}
+              title="Desktop preview"
+              className={`rounded p-1 transition-colors ${device === "desktop" ? "bg-white/10 text-white/80" : "text-white/30 hover:text-white/60"}`}
+            >
+              <Monitor className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setDevice("mobile")}
+              title="Mobile preview"
+              className={`rounded p-1 transition-colors ${device === "mobile" ? "bg-white/10 text-white/80" : "text-white/30 hover:text-white/60"}`}
+            >
+              <Smartphone className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* ── Focus mode ── */}
+          <button
+            onClick={onToggleFocusMode}
+            title={focusMode ? "Show chat" : "Focus preview"}
+            className="rounded-md p-1.5 text-white/60 transition-colors hover:bg-white/6 hover:text-white/90"
+          >
+            {focusMode ? (
+              <Minimize2 className="h-3.5 w-3.5" />
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5" />
+            )}
+          </button>
 
           <Button
             variant="ghost"
@@ -317,9 +465,9 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
 
       {/* Content area */}
       <div className="relative flex-1 overflow-hidden h-full">
-        {(isGenerating || isImproving) && (
+        {(isGenerating || isImproving) && !fileData && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-6 bg-[#0a0a0a]/85 backdrop-blur-sm">
-            <RingLoader color="#60a5fa" size={64} speedMultiplier={0.8} />
+            <RingLoader color="#a78bfa" size={64} speedMultiplier={0.8} />
             <div className="flex flex-col items-center gap-1.5">
               <p className="text-sm font-medium text-white/60">
                 {isImproving ? "Applying agent edits…" : currentStepLabel}
@@ -328,6 +476,16 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
                 This usually takes 10–20 seconds
               </p>
             </div>
+          </div>
+        )}
+
+        {/* Slim non-blocking status bar — edits on an existing app */}
+        {(isGenerating || isImproving) && fileData && (
+          <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-2 border-b border-violet-500/20 bg-[#0a0a0a]/90 px-3 py-1.5 backdrop-blur-sm">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />
+            <p className="text-xs text-white/60">
+              {isImproving ? "Applying agent edits…" : currentStepLabel}
+            </p>
           </div>
         )}
 
@@ -344,10 +502,18 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
             keepMounted
             className="mt-0 h-full w-full"
           >
-            <SandpackPreview
-              style={{ height: "89%" }}
-              showOpenInCodeSandbox={false}
-            />
+            <div
+              className={
+                device === "mobile"
+                  ? "mx-auto h-full w-full max-w-[390px] border-x border-white/10"
+                  : "h-full w-full"
+              }
+            >
+              <SandpackPreview
+                style={{ height: "89%" }}
+                showOpenInCodeSandbox={false}
+              />
+            </div>
           </TabsContent>
 
           <TabsContent
@@ -413,8 +579,14 @@ export function CodePanel({
   onFixError,
   appTitle,
   isImproving,
+  versions,
+  versionsLoading,
+  onRestoreVersion,
+  focusMode,
+  onToggleFocusMode,
 }: CodePanelProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
+  const [device, setDevice] = useState<PreviewDevice>("desktop");
 
   useEffect(() => {
     if (fileData) setActiveTab("preview");
@@ -436,7 +608,7 @@ export function CodePanel({
       <SandpackProvider
         key={filePathKey}
         template="react"
-        theme={dracula}
+        theme="dark"
         files={files}
         customSetup={{ dependencies }}
         options={{
@@ -454,6 +626,13 @@ export function CodePanel({
           fileData={fileData}
           appTitle={appTitle}
           isImproving={isImproving}
+          versions={versions}
+          versionsLoading={versionsLoading}
+          onRestoreVersion={onRestoreVersion}
+          focusMode={focusMode}
+          onToggleFocusMode={onToggleFocusMode}
+          device={device}
+          setDevice={setDevice}
         />
       </SandpackProvider>
     </div>
