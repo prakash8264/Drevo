@@ -1,7 +1,7 @@
 # 03 — Files reference (which file does what)
 
 ## `app/layout.tsx`
-Root layout. Loads `DM_Sans` + `Lora` fonts, `globals.css`, wraps in `ClerkProvider appearance={{theme: dark}}` (`@clerk/themes`), renders `Header`, `ThemeProvider`, `Toaster`. Metadata title `Forge - AI App Builder`.
+Root layout. Loads `DM_Sans` + `Lora` fonts, `globals.css`, wraps in `ClerkProvider appearance={{theme: dark}}` (`@clerk/themes`), renders `Header`, `ThemeProvider`, `Toaster`. Metadata title `Drevo � Dream it. Develop it.`.
 
 ## `app/page.tsx` (client landing)
 Hero with `HoleBackground`, rotating `PLACEHOLDERS`, prompt textarea (auto-resize to 200px), suggestion chips, Generate button. If signed in -> `router.push(/workspace?prompt=)`, else `SignInButton modal`. Below: browser mockup, `FEATURES` grid, `STEPS` timeline, `PRICING_PLANS` grid with `CheckoutButton`, CTA + footer.
@@ -34,13 +34,16 @@ Agentic edit API for follow-up chat prompts (all plans). Uses Cline `Agent` + `u
 `getUserProjects()` maps workspaces to `{id,title,firstPrompt (first user msg slice 120),createdAt,updatedAt,messageCount}`. `deleteProject()` via `deleteMany({id,userId})` + `revalidatePath("/projects")`.
 
 ## `components/WorkspaceClient.tsx`
-Client orchestrator. Holds `workspaceId, messages, fileData, credits, isGenerating/isImproving, statusLog`, `AbortController` refs + `messages/workspaceId/fileData` refs to avoid stale closures. Hybrid routing: no workspace/files yet -> `handleGenerate` (one-shot JSON); otherwise -> `handleImprove` (agent patch). Exposes `onGenerate/onFixError/handleStop` to children.
+Client orchestrator. Holds `workspaceId, messages, fileData, credits, isGenerating/isImproving, statusLog`, `AbortController` refs + `messages/workspaceId/fileData` refs to avoid stale closures. Hybrid routing: no workspace/files yet -> `handleGenerate` (one-shot JSON); otherwise -> `handleImprove` (agent patch). Exposes `onGenerate/onFixError/handleStop` to children. Also owns version history (`versions`, `refreshVersions`, `handleRestoreVersion` via `actions/versions`), `handleRegenerate` (re-run last user msg, `appendUser:false`) + `handleEditMessage` (truncate + resubmit), resizable chat (`chatWidth` 240–560px, `localStorage drevo:chat-width`, pointer-drag divider), `focusMode` toggle.
 
 ## `components/ChatPanel.tsx`
-Left panel (320px). Props: messages, isGenerating/isImproving, statusLog, credits, initialPrompt, onGenerate/onStop. Features: auto-resize textarea, auto-scroll, auto-submit `initialPrompt` once, Supabase image upload (`workspace-images`), credit badge via `PricingModal`, markdown rendering (`ReactMarkdown`), live `thinking` bubble during improve, no-credits upgrade banner.
+Left panel (resizable width, default 320px). Props: messages, isGenerating/isImproving, statusLog, credits, initialPrompt, onGenerate/onRegenerate/onEditMessage/onStop. Features: auto-resize textarea, auto-scroll, auto-submit `initialPrompt` once, Supabase image upload (`workspace-images`), credit badge via `PricingModal`, markdown rendering (`ReactMarkdown`), live `thinking` bubble during improve, no-credits upgrade banner. Chat tools: copy buttons (assistant bubbles), Regenerate last response (1 credit), edit-and-resend user messages (truncate + re-run through hybrid router).
 
-## `components/CodePanel.tsx` (545 lines)
-Right panel. Outer `CodePanel` creates `SandpackProvider key=filePathKey (paths only, not contents)` with `template=react`, `dracula`, `files ?? PLACEHOLDER_FILES`, `dependencies=BASE+AI`, `externalResources tailwind CDN`, `recompileMode delayed 500ms`. Inner `SandpackInner` (inside provider, uses `useSandpack()`): pushes diffs via `sandpack.updateFile` (no remount), listens for `show-error/compile/success` -> `previewError` banner, tabs Preview/Code (`SandpackPreview`, `FileExplorer`, `CodeEditor readOnly`), agent-edits progress pill while improving, `handleExportZip` (JSZip package.json + index.html + src/* + index.js + README), `Fix with AI` button -> `onFixError` (agent patch when files exist).
+## `components/CodePanel.tsx`
+Right panel. Outer `CodePanel` creates `SandpackProvider key=filePathKey (paths only, not contents)` with `template=react`, `dracula`, `files ?? PLACEHOLDER_FILES`, `dependencies=BASE+AI`, `externalResources tailwind CDN`, `recompileMode delayed 500ms`, plus `device` state (desktop/mobile). Inner `SandpackInner` (inside provider, uses `useSandpack()`): pushes diffs via `sandpack.updateFile` (no remount), listens for `show-error/compile/success` -> `previewError` banner, tabs Preview/Code (`SandpackPreview`, `FileExplorer`, `CodeEditor readOnly`). Progress: full overlay only for first-gen (`!fileData`); slim top status bar for edits on existing apps (non-blocking). Version history dropdown (clock, count badge, time-ago + file count + Restore, free + undoable, Esc to close). Device toggle (desktop / mobile-390px centered wrapper). Focus-mode button (hide chat). `handleExportZip` (JSZip package.json + index.html + src/* + index.js + README), `Fix with AI` button -> `onFixError` (agent patch when files exist).
+
+## `actions/versions.ts` + `types/version.ts` + `WorkspaceVersion` model
+Version history backend. `WorkspaceVersion { id, workspaceId cascade, fileData Json, summary?, createdAt }`, cap 20 per workspace (`pruneVersions`). `getVersions` (ownership-checked, newest-first summaries with file counts, no payloads), `restoreVersion` (snapshots current as "Before restore" first so restore is undoable, free, no credits). Both AI routes snapshot pre-run `fileData` on success.
 
 ## `components/Header.tsx` (async server)
 Calls `checkUser()`, renders fixed nav: logo, Projects link (signed-in), credits pill (PricingModal), `UserButton` / `SignInButton`s.

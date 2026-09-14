@@ -4,6 +4,7 @@ import { Agent, createTool } from "@cline/sdk";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
+import { pruneVersions } from "@/actions/versions";
 import type { FileData, Message } from "@/types/workspace";
 
 // ─── Helpers (mirrors gen-ai-code for hybrid chat routing) ───────────────────
@@ -334,21 +335,31 @@ RULES:
           { role: "assistant", content: summary },
         ];
 
-        await db.$transaction([
-          db.workspace.update({
-            where: { id: workspaceId, userId },
-            data: {
-              messages: updatedMessages as never,
-              fileData: newFileData as never,
-            },
-          }),
-          db.user.update({
-            where: { id: userId },
-            data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
-          }),
-        ]);
+          await db.$transaction([
+            db.workspace.update({
+              where: { id: workspaceId, userId },
+              data: {
+                messages: updatedMessages as never,
+                fileData: newFileData as never,
+              },
+            }),
+            // Snapshot the pre-run files so the edit stays restorable.
+            db.workspaceVersion.create({
+              data: {
+                workspaceId,
+                fileData: fileData as never,
+                summary: userRequest.slice(0, 120),
+              },
+            }),
+            db.user.update({
+              where: { id: userId },
+              data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
+            }),
+          ]);
 
-        const updatedUser = await db.user.findUnique({
+          await pruneVersions(workspaceId);
+
+          const updatedUser = await db.user.findUnique({
           where: { id: userId },
           select: { credits: true },
         });

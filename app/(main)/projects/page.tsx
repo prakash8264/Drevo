@@ -4,7 +4,7 @@ import { Zap } from "lucide-react";
 import { ProjectCard } from "@/components/ProjectCard";
 import Link from "next/link";
 import { getUserProjects } from "@/actions/projects";
-import { BlueTitle } from "@/components/reusables";
+import { BrandTitle } from "@/components/reusables";
 import { Button } from "@/components/ui/button";
 
 // ─── Empty state ──────────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ export default async function ProjectsPage() {
         {/* Header */}
         <div className="mb-8 flex items-center justify-between">
           <div>
-            <BlueTitle className="text-6xl">Projects</BlueTitle>
+            <BrandTitle className="text-6xl">Projects</BrandTitle>
             <p className="mt-3 text-sm text-white/30">
               All your AI-generated apps in one place.
             </p>

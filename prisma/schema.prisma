@@ -35,6 +35,18 @@ model Workspace {
   fileData  Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  versions  WorkspaceVersion[]
 
   @@index([userId])
+}
+
+model WorkspaceVersion {
+  id          String   @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  fileData    Json
+  summary     String?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId])
 }

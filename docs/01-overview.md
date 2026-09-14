@@ -2,7 +2,7 @@
 
 ## What this project is
 
-**Forge** is a prompt-to-website builder:
+**Drevo** is a prompt-to-website builder:
 
 1. User types a prompt like `Build a kanban board with drag and drop` (optionally attaches a screenshot).
 2. AI generates a complete React + Tailwind app (multiple files + npm dependencies) as JSON.

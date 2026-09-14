@@ -11,3 +11,4 @@ export type {
 } from "./workspace";
 export type { ProjectSummary } from "./project";
 export type { Plan } from "./plans";
+export type { VersionSummary, VersionDetail } from "./version";

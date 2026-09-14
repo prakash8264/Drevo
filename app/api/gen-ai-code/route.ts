@@ -5,6 +5,7 @@ import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
 import type { Message, FileData } from "@/types/workspace";
 import { aj } from "@/lib/arcjet";
+import { pruneVersions } from "@/actions/versions";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
@@ -331,6 +332,8 @@ export async function POST(request: NextRequest) {
           { role: "assistant", content: assistantMessage },
         ];
 
+        // Snapshot the pre-run files so the edit stays restorable.
+        // body fileData is the state before this run (null on first prompt).
         const [workspace] = await db.$transaction([
           workspaceId
             ? db.workspace.update({
@@ -348,11 +351,24 @@ export async function POST(request: NextRequest) {
                   fileData: newFileData as never,
                 },
               }),
+          ...(workspaceId && fileData
+            ? [
+                db.workspaceVersion.create({
+                  data: {
+                    workspaceId,
+                    fileData: fileData as never,
+                    summary: assistantMessage.slice(0, 120),
+                  },
+                }),
+              ]
+            : []),
           db.user.update({
             where: { id: userId },
             data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
           }),
         ]);
+
+        if (workspaceId) await pruneVersions(workspaceId);
 
         const updatedUser = await db.user.findUnique({
           where: { id: userId },

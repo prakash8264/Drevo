@@ -1,11 +1,18 @@
 // WorkspaceClient.tsx
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { ChatPanel } from "./ChatPanel";
 import { CodePanel } from "./CodePanel";
 import { MobileBlocker } from "./MobileBlocker";
 import { MIN_CREDITS_TO_GENERATE } from "@/lib/constants";
+import { getVersions, restoreVersion } from "@/actions/versions";
 import { toast } from "sonner";
 import type {
   Message,
@@ -13,6 +20,7 @@ import type {
   StatusStep,
   WorkspaceData,
 } from "@/types/workspace";
+import type { VersionSummary } from "@/types/version";
 
 export type {
   MessageRole,
@@ -62,6 +70,15 @@ export function WorkspaceClient({
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusLog, setStatusLog] = useState<StatusStep[]>([]);
   const [isImproving, setIsImproving] = useState(false);
+  const [versions, setVersions] = useState<VersionSummary[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const [chatWidth, setChatWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return 320;
+    const saved = Number(window.localStorage.getItem("drevo:chat-width"));
+    if (!Number.isFinite(saved)) return 320;
+    return Math.min(560, Math.max(240, saved));
+  });
 
   // AbortController refs — used to cancel in-flight streams
   const generateAbortRef = useRef<AbortController | null>(null);
@@ -85,6 +102,75 @@ export function WorkspaceClient({
     fileDataRef.current = fileData;
   }, [fileData]);
 
+  // Resizable chat panel — drag the divider, width persists to localStorage
+  const chatWidthRef = useRef(chatWidth);
+  useEffect(() => {
+    chatWidthRef.current = chatWidth;
+    try {
+      window.localStorage.setItem("drevo:chat-width", String(chatWidth));
+    } catch {
+      // private mode etc. — layout still works, just won't persist
+    }
+  }, [chatWidth]);
+  const resizingRef = useRef<{ startX: number; startW: number } | null>(null);
+  const handleDividerPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      resizingRef.current = { startX: e.clientX, startW: chatWidthRef.current };
+    },
+    []
+  );
+  const handleDividerPointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      const r = resizingRef.current;
+      if (!r) return;
+      setChatWidth(Math.min(560, Math.max(240, r.startW + e.clientX - r.startX)));
+    },
+    []
+  );
+  const handleDividerPointerUp = useCallback(() => {
+    resizingRef.current = null;
+  }, []);
+
+  // Version history — refreshed after every successful run + restore.
+  // Read id from ref so stable callbacks never close over a stale one.
+  const refreshVersions = useCallback(async () => {
+    const id = workspaceIdRef.current;
+    if (!id) {
+      setVersions([]);
+      return;
+    }
+    setVersionsLoading(true);
+    try {
+      setVersions(await getVersions(id));
+    } catch {
+      // silent — history is a nice-to-have, never block the workspace
+    } finally {
+      setVersionsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshVersions();
+  }, [workspaceId, refreshVersions]);
+
+  const handleRestoreVersion = useCallback(
+    async (versionId: string) => {
+      const id = workspaceIdRef.current;
+      if (!id || isGenerating || isImproving) return;
+      try {
+        const detail = await restoreVersion(id, versionId);
+        setFileData(detail.fileData);
+        refreshVersions();
+        toast.success("Version restored. Continue chatting to iterate.");
+      } catch {
+        toast.error("Restore failed. Please try again.");
+      }
+    },
+    [isGenerating, isImproving, refreshVersions]
+  );
+
   const pushStep = (label: string) => {
     setStatusLog((prev) => [
       ...prev.map((s, i) =>
@@ -102,8 +188,16 @@ export function WorkspaceClient({
     );
   };
 
+  // opts.history + appendUser:false powers regenerate / edit-resubmit:
+  // history already ends with the user message, so nothing is appended
+  // and rollback removes nothing on failure.
+  interface RunOpts {
+    history?: Message[];
+    appendUser?: boolean;
+  }
+
   const handleGenerate = useCallback(
-    async (prompt: string, imageUrl?: string) => {
+    async (prompt: string, imageUrl?: string, opts?: RunOpts) => {
       if (isGenerating) return;
       if (credits < MIN_CREDITS_TO_GENERATE) return;
 
@@ -113,10 +207,11 @@ export function WorkspaceClient({
         ...(imageUrl ? { imageUrl } : {}),
       };
 
-      const currentMessages = messagesRef.current;
+      const appendUser = opts?.appendUser !== false;
+      const baseMessages = opts?.history ?? messagesRef.current;
       const currentWorkspaceId = workspaceIdRef.current;
 
-      setMessages((prev) => [...prev, userMessage]);
+      if (appendUser) setMessages((prev) => [...prev, userMessage]);
       setIsGenerating(true);
       setStatusLog([{ label: "Thinking…", status: "running" }]);
 
@@ -125,7 +220,9 @@ export function WorkspaceClient({
       generateAbortRef.current = abortController;
 
       try {
-        const conversationHistory = [...currentMessages, userMessage];
+        const conversationHistory = appendUser
+          ? [...baseMessages, userMessage]
+          : baseMessages;
 
         const res = await fetch("/api/gen-ai-code", {
           method: "POST",
@@ -199,6 +296,8 @@ export function WorkspaceClient({
                   `/workspace?id=${event.workspaceId}`
                 );
               }
+              // New snapshot was saved server-side — reload history list
+              refreshVersions();
             } else if (event.type === "error") {
               const quotaMsg =
                 event.code === "QUOTA_EXCEEDED"
@@ -217,8 +316,9 @@ export function WorkspaceClient({
         }
       } catch (err) {
         // User-initiated stop — silently roll back the user message
+        // (only when this run appended one — regenerate keeps history)
         if (err instanceof Error && err.name === "AbortError") {
-          setMessages((prev) => prev.slice(0, -1));
+          if (appendUser) setMessages((prev) => prev.slice(0, -1));
           return;
         }
         console.error(err);
@@ -236,7 +336,7 @@ export function WorkspaceClient({
                 : 5000,
           }
         );
-        setMessages((prev) => prev.slice(0, -1));
+        if (appendUser) setMessages((prev) => prev.slice(0, -1));
       } finally {
         generateAbortRef.current = null;
         setIsGenerating(false);
@@ -244,13 +344,13 @@ export function WorkspaceClient({
       }
     },
     // fileData intentionally omitted — read via fileDataRef
-    [credits, isGenerating, userId]
+    [credits, isGenerating, userId, refreshVersions]
   );
 
   // Hybrid edit path — 2nd+ chat prompt, screenshot re-send, Fix-with-AI.
   // First prompt (no workspace/fileData yet) still uses handleGenerate.
   const handleImprove = useCallback(
-    async (userRequest: string, imageUrl?: string) => {
+    async (userRequest: string, imageUrl?: string, opts?: RunOpts) => {
       if (isGenerating || isImproving) return;
       if (credits < MIN_CREDITS_TO_GENERATE) return;
       if (!workspaceIdRef.current) return;
@@ -259,20 +359,34 @@ export function WorkspaceClient({
       const currentFileData = fileDataRef.current;
       if (!currentFileData) return;
 
+      const appendUser = opts?.appendUser !== false;
+      // Roll back what this run added: user + placeholder normally,
+      // placeholder only on regenerate / edit-resubmit.
+      const rollbackCount = appendUser ? 2 : 1;
       const userMessage: Message = {
         role: "user",
         content: userRequest,
         ...(imageUrl ? { imageUrl } : {}),
       };
-      const conversationHistory = [...messagesRef.current, userMessage];
+      const baseMessages = opts?.history ?? messagesRef.current;
+      const conversationHistory = appendUser
+        ? [...baseMessages, userMessage]
+        : baseMessages;
 
       setIsImproving(true);
 
-      setMessages((prev) => [
-        ...prev,
-        userMessage,
-        { role: "assistant", content: "" }, // placeholder, updated live
-      ]);
+      if (appendUser) {
+        setMessages((prev) => [
+          ...prev,
+          userMessage,
+          { role: "assistant", content: "" }, // placeholder, updated live
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "" }, // placeholder, updated live
+        ]);
+      }
 
       // Create a fresh AbortController for this request
       const abortController = new AbortController();
@@ -295,12 +409,12 @@ export function WorkspaceClient({
 
         if (res.status === 403) {
           toast.error("Something went wrong. Please try again.");
-          setMessages((prev) => prev.slice(0, -2));
+          setMessages((prev) => prev.slice(0, -rollbackCount));
           return;
         }
         if (res.status === 402) {
           toast.error("Not enough credits.");
-          setMessages((prev) => prev.slice(0, -2));
+          setMessages((prev) => prev.slice(0, -rollbackCount));
           return;
         }
         if (!res.ok || !res.body) throw new Error("Improve failed");
@@ -380,6 +494,8 @@ export function WorkspaceClient({
                   { duration: 8000 }
                 );
               }
+              // New snapshot was saved server-side — reload history list
+              refreshVersions();
             } else if (event.type === "error") {
               const quotaMsg =
                 event.code === "QUOTA_EXCEEDED"
@@ -397,9 +513,9 @@ export function WorkspaceClient({
           }
         }
       } catch (err) {
-        // User-initiated stop — silently roll back the user + placeholder messages
+        // User-initiated stop — silently roll back what this run added
         if (err instanceof Error && err.name === "AbortError") {
-          setMessages((prev) => prev.slice(0, -2));
+          setMessages((prev) => prev.slice(0, -rollbackCount));
           return;
         }
         const code = (err as Error & { code?: string })?.code;
@@ -412,14 +528,63 @@ export function WorkspaceClient({
                 ? 8000
                 : 5000,
         });
-        setMessages((prev) => prev.slice(0, -2));
+        setMessages((prev) => prev.slice(0, -rollbackCount));
       } finally {
         improveAbortRef.current = null;
         setIsImproving(false);
       }
     },
     // fileData intentionally omitted — read via fileDataRef above
-    [credits, isGenerating, isImproving, userId]
+    [credits, isGenerating, isImproving, userId, refreshVersions]
+  );
+
+  // Regenerate the last exchange: drop trailing assistant message(s) and
+  // re-run the last user message through the hybrid router. Costs 1 credit
+  // like a normal run (the new run appends a fresh assistant response).
+  const handleRegenerate = useCallback(() => {
+    if (isGenerating || isImproving) return;
+    if (credits < MIN_CREDITS_TO_GENERATE) return;
+    const current = messagesRef.current;
+    let lastUserIdx = -1;
+    for (let i = current.length - 1; i >= 0; i--) {
+      if (current[i].role === "user") {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx < 0) return;
+    const lastUser = current[lastUserIdx];
+    if (!lastUser.content.trim()) return;
+    const trimmed = current.slice(0, lastUserIdx + 1);
+    setMessages(trimmed);
+    const runOpts = { history: trimmed, appendUser: false } as const;
+    if (workspaceIdRef.current && fileDataRef.current) {
+      return handleImprove(lastUser.content, lastUser.imageUrl, runOpts);
+    }
+    return handleGenerate(lastUser.content, lastUser.imageUrl, runOpts);
+  }, [credits, isGenerating, isImproving, handleGenerate, handleImprove]);
+
+  // Edit-and-resubmit: rewrite a user message, drop everything after it,
+  // and re-run. Same routing + credit behavior as a fresh prompt.
+  const handleEditMessage = useCallback(
+    (index: number, content: string) => {
+      if (isGenerating || isImproving) return;
+      if (credits < MIN_CREDITS_TO_GENERATE) return;
+      const trimmedContent = content.trim();
+      if (!trimmedContent) return;
+      const current = messagesRef.current;
+      const msg = current[index];
+      if (!msg || msg.role !== "user") return;
+      const updated: Message = { ...msg, content: trimmedContent };
+      const trimmed = [...current.slice(0, index), updated];
+      setMessages(trimmed);
+      const runOpts = { history: trimmed, appendUser: false } as const;
+      if (workspaceIdRef.current && fileDataRef.current) {
+        return handleImprove(trimmedContent, updated.imageUrl, runOpts);
+      }
+      return handleGenerate(trimmedContent, updated.imageUrl, runOpts);
+    },
+    [credits, isGenerating, isImproving, handleGenerate, handleImprove]
   );
 
   // Cancel whichever stream is currently in-flight
@@ -457,20 +622,36 @@ export function WorkspaceClient({
 
       {/* Workspace — visible only on md+ screens */}
       <div className="hidden md:flex h-[calc(100vh-3.5rem)] overflow-hidden bg-[#0a0a0a]">
-        <ChatPanel
-          isImproving={isImproving}
-          messages={messages}
-          isGenerating={isGenerating}
-          statusLog={statusLog}
-          credits={credits}
-          initialPrompt={initialPrompt}
-          onGenerate={onGenerate}
-          onStop={handleStop}
-          userId={userId}
-          workspaceId={workspaceId}
-          appTitle={fileData?.title ?? workspace?.title ?? null}
-        />
-        <div className="w-px shrink-0 bg-white/6" />
+        {!focusMode && (
+          <ChatPanel
+            isImproving={isImproving}
+            messages={messages}
+            isGenerating={isGenerating}
+            statusLog={statusLog}
+            credits={credits}
+            initialPrompt={initialPrompt}
+            onGenerate={onGenerate}
+            onRegenerate={handleRegenerate}
+            onEditMessage={handleEditMessage}
+            onStop={handleStop}
+            userId={userId}
+            workspaceId={workspaceId}
+            appTitle={fileData?.title ?? workspace?.title ?? null}
+            width={chatWidth}
+          />
+        )}
+        {!focusMode && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize chat panel"
+            title="Drag to resize"
+            onPointerDown={handleDividerPointerDown}
+            onPointerMove={handleDividerPointerMove}
+            onPointerUp={handleDividerPointerUp}
+            className="w-1.5 shrink-0 cursor-col-resize bg-white/6 transition-colors hover:bg-violet-500/40 active:bg-violet-500/60 touch-none"
+          />
+        )}
         <CodePanel
           fileData={fileData}
           isGenerating={isGenerating}
@@ -478,6 +659,11 @@ export function WorkspaceClient({
           onFixError={handleFixError}
           appTitle={fileData?.title ?? workspace?.title ?? null}
           isImproving={isImproving}
+          versions={versions}
+          versionsLoading={versionsLoading}
+          onRestoreVersion={handleRestoreVersion}
+          focusMode={focusMode}
+          onToggleFocusMode={() => setFocusMode((v) => !v)}
         />
       </div>
     </>

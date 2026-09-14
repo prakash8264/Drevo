@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { DM_Sans, Lora } from "next/font/google";
 import "./globals.css";
 import { ClerkProvider } from "@clerk/nextjs";
@@ -21,11 +21,28 @@ const dmSans = DM_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Forge - AI App Builder",
-  description: "",
+  title: "Drevo — Dream it. Develop it.",
+  description:
+    "Drevo turns your ideas into working React apps. Describe what you want to build — AI writes the code and renders a live preview in your browser.",
   icons: {
-    icon: "/logo-short.jpeg",
+    icon: "/logo-short.svg",
   },
+  openGraph: {
+    title: "Drevo — Dream it. Develop it.",
+    description:
+      "Prompt-to-app builder: describe your idea, get a working React app with live preview.",
+    type: "website",
+  },
+  twitter: {
+    card: "summary",
+    title: "Drevo — Dream it. Develop it.",
+    description:
+      "Prompt-to-app builder: describe your idea, get a working React app with live preview.",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0a0a0a",
 };
 
 export default function RootLayout({
