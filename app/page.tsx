@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth, SignInButton } from "@clerk/nextjs";
@@ -19,6 +18,7 @@ import {
   SectionHeading,
   SectionLabel,
 } from "@/components/reusables";
+import { LogoMark } from "@/components/LogoMark";
 
 export default function LandingPage() {
   const { isSignedIn, has } = useAuth();
@@ -560,14 +560,8 @@ export default function LandingPage() {
       <footer className="relative z-10 border-t border-white/7 px-6 py-12">
         <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-8 sm:flex-row sm:items-start">
           <div className="flex flex-col items-center gap-3 sm:items-start">
-            <Link href="/" className="flex items-center gap-2 select-none">
-              <Image
-                src="/logo.svg"
-                alt="Drevo"
-                width={120}
-                height={34}
-                className="h-7 w-auto"
-              />
+            <Link href="/" className="flex items-center gap-2 select-none" aria-label="Drevo home">
+              <LogoMark size="md" />
             </Link>
             <p className="text-xs text-white/30">
               Dream it. Develop it.

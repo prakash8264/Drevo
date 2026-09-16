@@ -25,7 +25,7 @@ export const metadata: Metadata = {
   description:
     "Drevo turns your ideas into working React apps. Describe what you want to build — AI writes the code and renders a live preview in your browser.",
   icons: {
-    icon: "/logo-short.png",
+    icon: "/favicon.svg",
   },
   openGraph: {
     title: "Drevo — Dream it. Develop it.",

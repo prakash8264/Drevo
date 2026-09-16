@@ -12,6 +12,7 @@ import { ChatPanel } from "./ChatPanel";
 import { CodePanel } from "./CodePanel";
 import { MobileBlocker } from "./MobileBlocker";
 import { MIN_CREDITS_TO_GENERATE } from "@/lib/constants";
+import { emitCredits } from "@/lib/credits-bus";
 import { getVersions, restoreVersion } from "@/actions/versions";
 import { toast } from "sonner";
 import type {
@@ -67,8 +68,32 @@ export function WorkspaceClient({
     parseFileData(workspace?.fileData)
   );
   const [credits, setCredits] = useState(userCredits);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [statusLog, setStatusLog] = useState<StatusStep[]>([]);
+  const creditsRef = useRef(userCredits);
+  useEffect(() => {
+    creditsRef.current = credits;
+  }, [credits]);
+
+  const applyCredits = useCallback((next: number) => {
+    creditsRef.current = next;
+    setCredits(next);
+    emitCredits(next);
+  }, []);
+
+  const decrementOptimistic = useCallback(() => {
+    applyCredits(creditsRef.current - 1);
+  }, [applyCredits]);
+
+  const refundOptimistic = useCallback(() => {
+    applyCredits(creditsRef.current + 1);
+  }, [applyCredits]);
+
+  const applyAuthoritative = useCallback(
+    (next: number | undefined, fallback: number) => {
+      applyCredits(typeof next === "number" ? next : fallback);
+    },
+    [applyCredits]
+  );
+  const [isGenerating, setIsGenerating] = useState(false);  const [statusLog, setStatusLog] = useState<StatusStep[]>([]);
   const [isImproving, setIsImproving] = useState(false);
   const [versions, setVersions] = useState<VersionSummary[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
@@ -214,6 +239,11 @@ export function WorkspaceClient({
       if (appendUser) setMessages((prev) => [...prev, userMessage]);
       setIsGenerating(true);
       setStatusLog([{ label: "Thinking…", status: "running" }]);
+      // Optimistic -1 so header + chat counts drop on Enter.
+      // Authoritative value from SSE "done" reconciles it; failures refund below.
+      let charged = false;
+      decrementOptimistic();
+      charged = true;
 
       // Create a fresh AbortController for this request
       const abortController = new AbortController();
@@ -238,11 +268,19 @@ export function WorkspaceClient({
 
         if (res.status === 402) {
           setMessages((prev) => prev.slice(0, -1));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
           return;
         }
         if (res.status === 429) {
           toast.error("Too many requests. Please slow down.");
           setMessages((prev) => prev.slice(0, -1));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
           return;
         }
         if (!res.ok || !res.body) throw new Error("Generation failed");
@@ -283,8 +321,11 @@ export function WorkspaceClient({
               completeSteps();
               setWorkspaceId(event.workspaceId ?? null);
               if (event.fileData) setFileData(event.fileData);
-              if (typeof event.creditsRemaining === "number")
-                setCredits(event.creditsRemaining);
+              applyAuthoritative(
+                event.creditsRemaining,
+                creditsRef.current
+              );
+              charged = false;
               setMessages((prev) => [
                 ...prev,
                 { role: "assistant", content: event.assistantMessage ?? "" },
@@ -319,6 +360,10 @@ export function WorkspaceClient({
         // (only when this run appended one — regenerate keeps history)
         if (err instanceof Error && err.name === "AbortError") {
           if (appendUser) setMessages((prev) => prev.slice(0, -1));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
           return;
         }
         console.error(err);
@@ -337,6 +382,11 @@ export function WorkspaceClient({
           }
         );
         if (appendUser) setMessages((prev) => prev.slice(0, -1));
+        // No deduction on failure/quota - refund the optimistic -1.
+        if (charged) {
+          refundOptimistic();
+          charged = false;
+        }
       } finally {
         generateAbortRef.current = null;
         setIsGenerating(false);
@@ -344,7 +394,15 @@ export function WorkspaceClient({
       }
     },
     // fileData intentionally omitted — read via fileDataRef
-    [credits, isGenerating, userId, refreshVersions]
+    [
+      credits,
+      isGenerating,
+      userId,
+      refreshVersions,
+      decrementOptimistic,
+      refundOptimistic,
+      applyAuthoritative,
+    ]
   );
 
   // Hybrid edit path — 2nd+ chat prompt, screenshot re-send, Fix-with-AI.
@@ -391,6 +449,10 @@ export function WorkspaceClient({
       // Create a fresh AbortController for this request
       const abortController = new AbortController();
       improveAbortRef.current = abortController;
+      // Optimistic -1 so header + chat counts drop on Enter (reconciled at done).
+      let charged = false;
+      decrementOptimistic();
+      charged = true;
 
       try {
         const res = await fetch("/api/improve", {
@@ -410,11 +472,19 @@ export function WorkspaceClient({
         if (res.status === 403) {
           toast.error("Something went wrong. Please try again.");
           setMessages((prev) => prev.slice(0, -rollbackCount));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
           return;
         }
         if (res.status === 402) {
           toast.error("Not enough credits.");
           setMessages((prev) => prev.slice(0, -rollbackCount));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
           return;
         }
         if (!res.ok || !res.body) throw new Error("Improve failed");
@@ -475,8 +545,8 @@ export function WorkspaceClient({
             } else if (event.type === "done") {
               // Apply all patches at once now that the stream is complete
               if (event.fileData) setFileData(event.fileData);
-              if (typeof event.creditsRemaining === "number")
-                setCredits(event.creditsRemaining);
+              applyAuthoritative(event.creditsRemaining, creditsRef.current);
+              charged = false;
               // Replace thinking text with clean summary
               setMessages((prev) => {
                 const updated = [...prev];
@@ -516,6 +586,10 @@ export function WorkspaceClient({
         // User-initiated stop — silently roll back what this run added
         if (err instanceof Error && err.name === "AbortError") {
           setMessages((prev) => prev.slice(0, -rollbackCount));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
           return;
         }
         const code = (err as Error & { code?: string })?.code;
@@ -529,13 +603,27 @@ export function WorkspaceClient({
                 : 5000,
         });
         setMessages((prev) => prev.slice(0, -rollbackCount));
+        // No deduction on failure/quota - refund the optimistic -1.
+        if (charged) {
+          refundOptimistic();
+          charged = false;
+        }
       } finally {
         improveAbortRef.current = null;
         setIsImproving(false);
       }
     },
     // fileData intentionally omitted — read via fileDataRef above
-    [credits, isGenerating, isImproving, userId, refreshVersions]
+    [
+      credits,
+      isGenerating,
+      isImproving,
+      userId,
+      refreshVersions,
+      decrementOptimistic,
+      refundOptimistic,
+      applyAuthoritative,
+    ]
   );
 
   // Regenerate the last exchange: drop trailing assistant message(s) and

@@ -22,7 +22,7 @@ import { PricingModal } from "@/components/PricingModal";
 import type { Message, StatusStep } from "@/types/workspace";
 import { createClient } from "@supabase/supabase-js";
 import { BrandTitle } from "./reusables";
-import Image from "next/image";
+import { LogoMark } from "@/components/LogoMark";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -283,13 +283,7 @@ export function ChatPanel({
                   </div>
                 ) : (
                   <div className="group flex items-start gap-2">
-                    <Image
-                      src="/logo-short.png"
-                      alt="Drevo"
-                      width={24}
-                      height={24}
-                      className="mt-0.5 h-6 w-6 shrink-0 rounded-md"
-                    />
+                    <LogoMark size="sm" className="mt-0.5" />
                     <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm bg-white/5 px-3.5 py-2.5">
                       {isLiveStream && !msg.content ? (
                         // Empty placeholder — show thinking indicator
@@ -353,13 +347,7 @@ export function ChatPanel({
           {/* Live status steps — only shown during normal generation */}
           {isGenerating && (
             <div className="flex items-start gap-2">
-              <Image
-                src="/logo-short.png"
-                alt="Drevo"
-                width={24}
-                height={24}
-                className="mt-0.5 h-6 w-6 shrink-0 rounded-md"
-              />
+              <LogoMark size="sm" className="mt-0.5" />
               <div className="rounded-2xl rounded-tl-sm bg-white/5 px-3.5 py-3">
                 <div className="space-y-2">
                   {statusLog.map((step, i) => (

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Drevo">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0a0a0a" stroke="rgba(255,255,255,0.15)" stroke-width="2"/>
+  <g transform="translate(16,14) scale(1.35)" fill="#ffffff" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+  </g>
+</svg>
