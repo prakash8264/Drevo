@@ -23,6 +23,8 @@ export default async function WorkspacePage({
       workspace={workspace}
       userCredits={user.credits}
       userId={user.id}
+      githubConnected={user.githubConnected}
+      githubUsername={user.githubUsername}
     />
   );
 }

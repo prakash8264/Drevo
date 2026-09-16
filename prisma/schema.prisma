@@ -23,6 +23,11 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  githubAccessToken String? // encrypted GitHub OAuth token, never sent to client
+  githubUsername    String?
+  githubUserId      String?
+  githubConnectedAt DateTime?
+
   workspaces Workspace[]
 }
 
@@ -36,6 +41,11 @@ model Workspace {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   versions  WorkspaceVersion[]
+
+  githubRepoUrl      String?
+  githubRepoFullName String?
+  githubBranch       String? // defaults to "main" on push
+  lastPushedAt       DateTime?
 
   @@index([userId])
 }

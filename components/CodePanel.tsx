@@ -28,6 +28,12 @@ import {
 import { formatDistanceToNow } from "date-fns";
 import { RingLoader } from "react-spinners";
 import JSZip from "jszip";
+import {
+  BASE_DEPENDENCIES,
+  buildProjectFiles,
+  exportZipName,
+} from "@/lib/export-project";
+import { GithubPushDialog, type LastPush } from "@/components/GithubPushDialog";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import type { FileData, StatusStep } from "@/types/workspace";
@@ -57,30 +63,6 @@ const PLACEHOLDER_FILES = {
   },
 };
 
-// ─── Base dependencies ────────────────────────────────────────────────────────
-
-const BASE_DEPENDENCIES: Record<string, string> = {
-  "react-is": "latest",
-  "react-router-dom": "latest",
-  "lucide-react": "latest",
-  recharts: "latest",
-  "date-fns": "latest",
-  "framer-motion": "latest",
-  "react-hook-form": "latest",
-  "@hookform/resolvers": "latest",
-  zod: "latest",
-  "@radix-ui/react-dialog": "latest",
-  "@radix-ui/react-dropdown-menu": "latest",
-  "@radix-ui/react-tabs": "latest",
-  "@radix-ui/react-tooltip": "latest",
-  "@radix-ui/react-accordion": "latest",
-  "@radix-ui/react-select": "latest",
-  axios: "latest",
-  clsx: "latest",
-  "class-variance-authority": "latest",
-  "tailwind-merge": "latest",
-};
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ActiveTab = "preview" | "code";
@@ -99,6 +81,12 @@ interface CodePanelProps {
   onRestoreVersion: (versionId: string) => Promise<void>;
   focusMode: boolean;
   onToggleFocusMode: () => void;
+  workspaceId: string | null;
+  githubConnected: boolean;
+  githubUsername: string | null;
+  lastPush: LastPush | null;
+  onPushed: (push: LastPush) => void;
+  onGithubConnectionChange: (connected: boolean, username: string | null) => void;
 }
 
 // ─── SandpackInner ────────────────────────────────────────────────────────────
@@ -122,6 +110,12 @@ function SandpackInner({
   onToggleFocusMode,
   device,
   setDevice,
+  workspaceId,
+  githubConnected,
+  githubUsername,
+  lastPush,
+  onPushed,
+  onGithubConnectionChange,
 }: {
   isGenerating: boolean;
   statusLog: StatusStep[];
@@ -138,6 +132,12 @@ function SandpackInner({
   onToggleFocusMode: () => void;
   device: PreviewDevice;
   setDevice: (d: PreviewDevice) => void;
+  workspaceId: string | null;
+  githubConnected: boolean;
+  githubUsername: string | null;
+  lastPush: LastPush | null;
+  onPushed: (push: LastPush) => void;
+  onGithubConnectionChange: (connected: boolean, username: string | null) => void;
 }) {
   const { sandpack, listen } = useSandpack();
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -209,6 +209,8 @@ function SandpackInner({
   }, [showHistory]);
 
   // ── Export to ZIP ──────────────────────────────────────────────────────────
+  // File map comes from the shared buildProjectFiles() builder so the ZIP
+  // download and the GitHub push can never drift apart.
   const handleExportZip = async () => {
     if (isExporting) return;
     setIsExporting(true);
@@ -218,87 +220,22 @@ function SandpackInner({
           ? sandpack.files
           : fileData?.files ?? {};
 
-      const dependencies = {
-        ...BASE_DEPENDENCIES,
-        ...(fileData?.dependencies ?? {}),
-      };
+      const projectFiles = buildProjectFiles({
+        files: filesToZip as Record<string, { code: string }>,
+        dependencies: fileData?.dependencies ?? {},
+        title: appTitle ?? fileData?.title ?? null,
+      });
 
       const zip = new JSZip();
-
-      const packageJson = {
-        name: "drevo-app",
-        version: "1.0.0",
-        private: true,
-        dependencies: {
-          react: "^18.2.0",
-          "react-dom": "^18.2.0",
-          "react-scripts": "5.0.1",
-          ...dependencies,
-        },
-        scripts: {
-          start: "react-scripts start",
-          build: "react-scripts build",
-        },
-        browserslist: {
-          production: [">0.2%", "not dead", "not op_mini all"],
-          development: ["last 1 chrome version"],
-        },
-      };
-      zip.file("package.json", JSON.stringify(packageJson, null, 2));
-
-      zip.file(
-        "public/index.html",
-        `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Drevo App</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
-</html>`
-      );
-
-      for (const [filePath, fileObj] of Object.entries(filesToZip)) {
-        const code =
-          typeof fileObj === "object" && fileObj !== null && "code" in fileObj
-            ? (fileObj as { code: string }).code
-            : "";
-        const zipPath = filePath.startsWith("/")
-          ? `src${filePath}`
-          : `src/${filePath}`;
-        zip.file(zipPath, code);
+      for (const [zipPath, content] of Object.entries(projectFiles)) {
+        zip.file(zipPath, content);
       }
-
-      zip.file(
-        "src/index.js",
-        `import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
-
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<React.StrictMode><App /></React.StrictMode>);`
-      );
-
-      zip.file(
-        "README.md",
-        `# Drevo App\n\nGenerated with [Drevo](https://drevo.app).\n\n## Getting started\n\n\`\`\`bash\nnpm install\nnpm start\n\`\`\``
-      );
 
       const blob = await zip.generateAsync({ type: "blob" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const zipName = appTitle
-        ? `${appTitle
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-|-$/g, "")}.zip`
-        : "drevo-app.zip";
-      a.download = zipName;
+      a.download = exportZipName(appTitle);
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -460,6 +397,18 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
             )}
             Download
           </Button>
+
+          <GithubPushDialog
+            workspaceId={workspaceId}
+            appTitle={appTitle}
+            fileDataPresent={Boolean(fileData)}
+            disabled={isBusy}
+            githubConnected={githubConnected}
+            githubUsername={githubUsername}
+            lastPush={lastPush}
+            onPushed={onPushed}
+            onConnectionChange={onGithubConnectionChange}
+          />
         </div>
       </div>
 
@@ -584,6 +533,12 @@ export function CodePanel({
   onRestoreVersion,
   focusMode,
   onToggleFocusMode,
+  workspaceId,
+  githubConnected,
+  githubUsername,
+  lastPush,
+  onPushed,
+  onGithubConnectionChange,
 }: CodePanelProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
   const [device, setDevice] = useState<PreviewDevice>("desktop");
@@ -633,6 +588,12 @@ export function CodePanel({
           onToggleFocusMode={onToggleFocusMode}
           device={device}
           setDevice={setDevice}
+          workspaceId={workspaceId}
+          githubConnected={githubConnected}
+          githubUsername={githubUsername}
+          lastPush={lastPush}
+          onPushed={onPushed}
+          onGithubConnectionChange={onGithubConnectionChange}
         />
       </SandpackProvider>
     </div>

@@ -35,6 +35,8 @@ interface WorkspaceClientProps {
   workspace: WorkspaceData | null;
   userCredits: number;
   userId: string;
+  githubConnected: boolean;
+  githubUsername: string | null;
 }
 
 function parseMessages(raw: unknown): Message[] {
@@ -57,6 +59,8 @@ export function WorkspaceClient({
   workspace,
   userCredits,
   userId,
+  githubConnected: initialGithubConnected,
+  githubUsername: initialGithubUsername,
 }: WorkspaceClientProps) {
   const [workspaceId, setWorkspaceId] = useState<string | null>(
     workspace?.id ?? null
@@ -97,6 +101,23 @@ export function WorkspaceClient({
   const [isImproving, setIsImproving] = useState(false);
   const [versions, setVersions] = useState<VersionSummary[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
+  const [githubConnected, setGithubConnected] = useState(initialGithubConnected);
+  const [githubUsername, setGithubUsername] = useState<string | null>(initialGithubUsername);
+  const [lastPush, setLastPush] = useState<{
+    repoUrl: string;
+    fullName: string;
+    branch: string;
+    pushedAt: string;
+  } | null>(() =>
+    workspace?.githubRepoUrl
+      ? {
+          repoUrl: workspace.githubRepoUrl,
+          fullName: workspace.githubRepoFullName ?? workspace.githubRepoUrl,
+          branch: workspace.githubBranch ?? "main",
+          pushedAt: workspace.lastPushedAt ?? "",
+        }
+      : null
+  );
   const [focusMode, setFocusMode] = useState(false);
   const [chatWidth, setChatWidth] = useState<number>(() => {
     if (typeof window === "undefined") return 320;
@@ -752,6 +773,15 @@ export function WorkspaceClient({
           onRestoreVersion={handleRestoreVersion}
           focusMode={focusMode}
           onToggleFocusMode={() => setFocusMode((v) => !v)}
+          workspaceId={workspaceId}
+          githubConnected={githubConnected}
+          githubUsername={githubUsername}
+          lastPush={lastPush}
+          onPushed={setLastPush}
+          onGithubConnectionChange={(connected, username) => {
+            setGithubConnected(connected);
+            setGithubUsername(username);
+          }}
         />
       </div>
     </>

@@ -24,10 +24,16 @@ export interface WorkspaceData {
   title: string | null;
   messages: unknown;
   fileData: unknown;
+  githubRepoUrl: string | null;
+  githubRepoFullName: string | null;
+  githubBranch: string | null;
+  lastPushedAt: string | null;
 }
 
 export interface WorkspaceUser {
   id: string;
   credits: number;
   plan: string;
+  githubConnected: boolean;
+  githubUsername: string | null;
 }
