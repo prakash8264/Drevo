@@ -8,7 +8,8 @@
 2. AI generates a complete React + Tailwind app (multiple files + npm dependencies) as JSON.
 3. The app renders instantly in a live browser preview (Sandpack) with a code viewer.
 4. User keeps chatting to iterate — follow-up prompts (and **Fix with AI**) go through the agent as patch edits for all plans — or clicks **Fix with AI** when the preview throws.
-5. User can save workspaces, browse `/projects`, and download any app as a ZIP.
+5. User can save workspaces, browse `/projects`, and download any app as a ZIP — or push it straight to GitHub (new repo, existing repo, or one-click Update).
+6. Credit counts update instantly in the header and chat via optimistic updates (rollback on failure), no refresh needed.
 
 ## Features
 
@@ -18,8 +19,10 @@
 - Smart packages: AI picks deps, server validates against npm registry.
 - AI error recovery: preview runtime error -> one-click fix.
 - Image-aware prompts: Supabase Storage public URL passed to Gemini.
-- Credits + plans (Free 10 / Starter 50 / Pro 150), Clerk Billing checkout.
-- Workspaces persisted (messages + fileData JSON).
+- Credits + plans (Free 10 / Starter 50 / Pro 150), Clerk Billing checkout, realtime optimistic credit display.
+- Workspaces persisted (messages + fileData JSON), version history (20 snapshots, free undoable restore).
+- GitHub integration: OAuth connect, push to new/existing repo, one-click Update, divergence-safe (never force push).
+- Single export source of truth: `buildProjectFiles()` feeds both ZIP download and GitHub push.
 
 ## Tech stack
 
@@ -28,13 +31,14 @@
 | Framework | Next.js 16.3.4 (Turbopack), React 19.2.8 |
 | Auth/Billing | `@clerk/nextjs@7`, `@clerk/themes` (dark), `CheckoutButton` experimental |
 | AI generate | `@google/genai`, model `gemini-3.5-flash`, `generateContentStream`, `responseMimeType: application/json`, `thinkingConfig.includeThoughts` |
-| AI edit (2nd+ prompt) | `@cline/sdk` `Agent({providerId: gemini, maxIterations: 5})`, tools `update_file` + `add_dependency` + `done_improving`, all plans |
+| AI edit (2nd+ prompt) | `@cline/sdk` `Agent({providerId: gemini, maxIterations: 12})`, tools `update_file` + `add_dependency` + `done_improving`, all plans |
 | Preview/Code | `@codesandbox/sandpack-react`, `@codesandbox/sandpack-themes` (dracula), template `react`, CDN `tailwindcss` |
 | DB | Prisma 7 + `@prisma/adapter-pg`, Postgres via Supabase pooler, custom output `lib/generated/prisma` |
 | Images | `@supabase/supabase-js`, bucket `workspace-images` |
 | Security | `@arcjet/next` shield + detectBot (proxy) + tokenBucket/prompt-injection (route client, partly disabled) |
 | Styling/UI | Tailwind 4, shadcn/ui, `next-themes`, `lucide-react`, `sonner`, `react-markdown`, `react-spinners`, `motion` |
-| Export | `jszip` |
+| Export | `jszip`, shared `lib/export-project.ts` builder |
+| GitHub | `octokit`, OAuth App (`repo read:user`), AES-256-GCM token storage |
 | Validation | `zod` (Cline tool schemas) |
 
 ## High-level mental model
@@ -45,5 +49,10 @@ Prompt (page.tsx / ChatPanel)
   -> WorkspaceClient state {messages, fileData, credits}
   -> CodePanel SandpackProvider (preview + code)
   -> Iterate via ChatPanel: 1st prompt POST /api/gen-ai-code, follow-ups POST /api/improve (Cline agent, patch-only)
-  -> Persisted in Prisma Workspace, gated by credits/plan
+  -> Persisted in Prisma Workspace (+20 version snapshots), gated by credits/plan
+  -> Export via buildProjectFiles(): ZIP download or GitHub push (new/existing/Update)
 ```
+
+See [05-workflows](./05-workflows.md) for every flow with diagrams,
+[07-github-integration](./07-github-integration.md) for GitHub in depth,
+[08-ai-agent-deep-dive](./08-ai-agent-deep-dive.md) for the agent in depth.
