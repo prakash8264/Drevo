@@ -15,12 +15,24 @@ export async function getWorkspaceUser(): Promise<WorkspaceUser> {
 
   const user = await db.user.findUnique({
     where: { clerkId },
-    select: { id: true, credits: true, plan: true },
+    select: {
+      id: true,
+      credits: true,
+      plan: true,
+      githubAccessToken: true,
+      githubUsername: true,
+    },
   });
 
   if (!user) redirect("/");
 
-  return user;
+  return {
+    id: user.id,
+    credits: user.credits,
+    plan: user.plan,
+    githubConnected: Boolean(user.githubAccessToken),
+    githubUsername: user.githubUsername,
+  };
 }
 
 // ─── Get a workspace by id (must belong to the current user) ─────────────────
@@ -36,10 +48,17 @@ export async function getWorkspaceById(
       title: true,
       messages: true,
       fileData: true,
+      githubRepoUrl: true,
+      githubRepoFullName: true,
+      githubBranch: true,
+      lastPushedAt: true,
     },
   });
 
   if (!workspace) redirect("/");
 
-  return workspace;
+  return {
+    ...workspace,
+    lastPushedAt: workspace.lastPushedAt?.toISOString() ?? null,
+  };
 }
