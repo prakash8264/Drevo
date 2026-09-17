@@ -50,6 +50,26 @@ export function validateRepoName(name: string): string | null {
   return null;
 }
 
+// ─── Branch + repo-full-name validation ───────────────────────────────────────
+
+export function validateBranchName(name: string): string | null {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return "Branch name is required.";
+  if (trimmed.length > 250) return "Branch name must be 250 characters or fewer.";
+  if (/[\s~^:?*[\]\\]/.test(trimmed) || trimmed.includes(".."))
+    return "Branch name contains invalid characters.";
+  if (trimmed.startsWith("/") || trimmed.endsWith("/") || trimmed.endsWith(".lock"))
+    return "Branch name is not a valid git ref.";
+  return null;
+}
+
+export function parseRepoFullName(fullName: string): { owner: string; repo: string } | null {
+  const trimmed = fullName.trim();
+  const m = /^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/.exec(trimmed);
+  if (!m) return null;
+  return { owner: m[1], repo: m[2] };
+}
+
 // ─── OAuth helpers ────────────────────────────────────────────────────────────
 
 export const GITHUB_OAUTH_STATE_COOKIE = "github_oauth_state";

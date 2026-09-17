@@ -46,6 +46,7 @@ model Workspace {
   githubRepoFullName String?
   githubBranch       String? // defaults to "main" on push
   lastPushedAt       DateTime?
+  githubPushedFiles  Json? // repo-relative paths from the last successful push (for deletions)
 
   @@index([userId])
 }

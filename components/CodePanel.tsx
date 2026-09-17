@@ -23,6 +23,7 @@ import {
   Minimize2,
   Monitor,
   Smartphone,
+  Upload,
   X,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
@@ -34,6 +35,8 @@ import {
   exportZipName,
 } from "@/lib/export-project";
 import { GithubPushDialog, type LastPush } from "@/components/GithubPushDialog";
+import { pushToGithub } from "@/lib/github-push-client";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import type { FileData, StatusStep } from "@/types/workspace";
@@ -142,6 +145,7 @@ function SandpackInner({
   const { sandpack, listen } = useSandpack();
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -247,6 +251,37 @@ function SandpackInner({
 
   const currentStepLabel =
     statusLog[statusLog.length - 1]?.label ?? "Generating…";
+
+  // One-click push of the latest code to the linked repo/branch.
+  const handleQuickUpdate = async () => {
+    if (isUpdating || isBusy || !fileData || !workspaceId || !lastPush) return;
+    setIsUpdating(true);
+    try {
+      const outcome = await pushToGithub({
+        workspaceId,
+        mode: "existing",
+        repoFullName: lastPush.fullName,
+        branch: lastPush.branch,
+        commitMessage: "Update from Drevo",
+      });
+      if (!outcome.ok) {
+        if (outcome.error.code === "GITHUB_NOT_CONNECTED" || outcome.error.code === "GITHUB_TOKEN_INVALID") {
+          onGithubConnectionChange(false, null);
+        }
+        toast.error(outcome.error.message);
+        return;
+      }
+      onPushed({
+        repoUrl: outcome.result.repoUrl,
+        fullName: outcome.result.fullName || lastPush.fullName,
+        branch: outcome.result.branch,
+        pushedAt: new Date().toISOString(),
+      });
+      toast.success(outcome.result.unchanged ? "Already up to date on GitHub." : "GitHub updated.");
+    } finally {
+      setIsUpdating(false);
+    }
+  };
 
   return (
     <Tabs
@@ -409,6 +444,22 @@ function SandpackInner({
             onPushed={onPushed}
             onConnectionChange={onGithubConnectionChange}
           />
+
+          {lastPush && (
+            <Button
+              variant="ghost"
+              onClick={handleQuickUpdate}
+              disabled={isUpdating || isBusy || !fileData || !workspaceId}
+              title={`Push latest code to ${lastPush.fullName} (${lastPush.branch})`}
+            >
+              {isUpdating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Upload className="h-3.5 w-3.5" />
+              )}
+              Update
+            </Button>
+          )}
         </div>
       </div>
 
