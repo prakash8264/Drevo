@@ -1,7 +1,6 @@
 import arcjet, {
   tokenBucket,
   detectPromptInjection,
-  sensitiveInfo,
 } from "@arcjet/next";
 
 // Route-level Arcjet client for /api/gen-ai-code only.

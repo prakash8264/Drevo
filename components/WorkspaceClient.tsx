@@ -296,7 +296,12 @@ export function WorkspaceClient({
           return;
         }
         if (res.status === 429) {
-          toast.error("Too many requests. Please slow down.");
+          // Rate-limit and prompt-injection refusals are free. Prefer the
+          // server's message (REFUSED vs RATE_LIMITED) when present.
+          const data = (await res.json().catch(() => null)) as {
+            message?: string;
+          } | null;
+          toast.error(data?.message ?? "Too many requests. Please slow down.");
           setMessages((prev) => prev.slice(0, -1));
           if (charged) {
             refundOptimistic();

@@ -145,7 +145,11 @@ zod, react-hook-form`, …).
 
 **`done_improving({summary})`** — sets `finalSummary`; declared with
 `lifecycle: {completesRun: true}` so the Cline loop stops immediately
-after it instead of burning more iterations.
+after it instead of burning more iterations. Refusals and no-op requests
+(system-prompt/secret asks, pure questions, chit-chat, explicit no-change)
+must call it immediately with NO `update_file` calls and a summary starting
+with `NO_OP: ` — the server short-circuits these free (see §2.5). The
+prompt also forbids revealing, quoting, or paraphrasing instructions.
 
 ### 2.3 Agent construction
 
@@ -181,7 +185,7 @@ agent.subscribe((event) => { … })
 - `tool-started` → friendly deltas: `` Updating `path`… ``,
   `` Adding `pkg`… ``, `Finalizing changes…`.
 
-### 2.5 `finishRun(summary, partial)` and the budget-exhaustion path
+### 2.5 `finishRun(summary, partial)`, no-op short-circuit, budget path
 
 ```ts
 finishRun = async (summary, partial) => {
@@ -195,6 +199,14 @@ finishRun = async (summary, partial) => {
   safeEnqueue(done{fileData, summary, partial, creditsRemaining});
 }
 ```
+
+- **No-op short-circuit (free):** after a successful run, if
+  `getChangedPaths()` is empty AND dependencies are unchanged, the server
+  skips the transaction entirely and emits
+  `done{fileData: <current unchanged>, summary, partial: false,
+  creditsRemaining: <pre-run value>}` — no deduction, no version snapshot.
+  The pre-run value corrects the client's optimistic −1 back up. This is
+  what refusals (`NO_OP:` summaries), answers, and chit-chat resolve to.
 
 - `result.status === "failed"` with a max-iterations-shaped message
   (`isMaxIterationsError` regex, `MaxIterationsError` class) →

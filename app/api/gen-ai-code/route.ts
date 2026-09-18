@@ -170,29 +170,37 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "No messages provided" }, { status: 400 });
   }
 
-  // ── Arcjet: rate limit, prompt injection, sensitive info ──────────────────
+  // ── Arcjet: per-user rate limit + prompt-injection screen ────────────────
+  // Denials are free friendly refusals (no credit, no agent run).
   // detectPromptInjectionMessage requires the actual user text to inspect.
 
-  // const arcjetReq = new Request(request.url, {
-  //   method: request.method,
-  //   headers: request.headers,
-  //   body: JSON.stringify(body),
-  // });
+  const arcjetReq = new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: JSON.stringify(body),
+  });
 
-  // const lastUserMessage =
-  //   [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  // const decision = await aj.protect(arcjetReq, {
-  //   requested: 1,
-  //   userId: clerkId,
-  //   detectPromptInjectionMessage: lastUserMessage,
-  // });
+  const lastUserMessage =
+    [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const decision = await aj.protect(arcjetReq, {
+    requested: 1,
+    userId: clerkId,
+    detectPromptInjectionMessage: lastUserMessage,
+  });
 
-  // if (decision.isDenied()) {
-  //   return Response.json(
-  //     { message: decision.reason?.type ?? "Request blocked" },
-  //     { status: 429 }
-  //   );
-  // }
+  if (decision.isDenied()) {
+    const reasonType = String(decision.reason?.type ?? "");
+    const isInjection = /prompt.injection/i.test(reasonType);
+    return Response.json(
+      {
+        message: isInjection
+          ? "I can't help with that request. Try describing the app you want to build instead."
+          : "Too many requests. Please slow down.",
+        code: isInjection ? "REFUSED" : "RATE_LIMITED",
+      },
+      { status: 429 }
+    );
+  }
 
   const user = await db.user.findUnique({
     where: { id: userId, clerkId },

@@ -47,7 +47,7 @@ lib/
   data.ts                       SUGGESTIONS, FEATURES, STEPS, PLACEHOLDERS
   checkUser.ts                  Clerk->DB sync, plan/credit delta logic
   prisma.ts                     Prisma singleton
-  arcjet.ts                     Route-level rate-limit + prompt-injection client (invocation currently commented out)
+  arcjet.ts                     Route-level rate-limit + prompt-injection client (enforced in gen-ai-code; denials are free 429s)
   utils.ts                      cn()
   export-project.ts             buildProjectFiles* (ZIP + GitHub source of truth), .gitignore/.env.example
   github.ts                     Token crypto, repo/branch validators, OAuth URL helpers

@@ -37,7 +37,7 @@ flowchart TD
   DB --> UI[Apply fileData at once + summary replaces thinking]
 ```
 
-Routing lives in `WorkspaceClient`: no workspace/files yet -> Flow A/B (one-shot JSON); otherwise -> this flow. No separate Improve button. Patches apply at `done` to avoid Sandpack remounts mid-stream. If the step budget runs out after files changed, completed updates are kept (partial `done`, 1 credit, "ask to continue"); if nothing changed, a free friendly error is sent.
+Routing lives in `WorkspaceClient`: no workspace/files yet -> Flow A/B (one-shot JSON); otherwise -> this flow. No separate Improve button. Patches apply at `done` to avoid Sandpack remounts mid-stream. If the step budget runs out after files changed, completed updates are kept (partial `done`, 1 credit, "ask to continue"); if nothing changed, a free friendly error is sent. Refusals and no-op requests (`NO_OP:` summaries, no changed paths/deps) resolve to a free `done` with unchanged files — no deduction, no snapshot.
 
 ## Flow D — Preview error -> Fix with AI
 
@@ -49,7 +49,7 @@ Routing lives in `WorkspaceClient`: no workspace/files yet -> Flow A/B (one-shot
 
 ## Flow F — Auth / billing / credits
 
-`proxy.ts` redirects anon from `/workspace|/projects` to sign-in. `Header checkUser()` creates (10 free credits) or syncs plan delta on upgrade. `PricingModal`/`page.tsx` pricing -> `CheckoutButton planId` -> Clerk checkout drawer -> Stripe. Both AI routes 402 gate no-credits (1 credit each, all plans). Credits only decremented inside success transaction.
+`proxy.ts` redirects anon from `/workspace|/projects` to sign-in. `Header checkUser()` creates (10 free credits) or syncs plan delta on upgrade. `PricingModal`/`page.tsx` pricing -> `CheckoutButton planId` -> Clerk checkout drawer -> Stripe. Both AI routes 402 gate no-credits (1 credit each, all plans). Credits only decremented inside success transactions — plus the no-op short-circuit (improve runs that change nothing are free). `gen-ai-code` additionally passes an Arcjet screen first: rate-limit or prompt-injection denial returns a free `429 {code: REFUSED|RATE_LIMITED}` before any AI call (client toasts the server message, rolls back, refunds).
 
 ## Flow G — Export ZIP
 

@@ -21,7 +21,10 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   user parts get the image hint prepended when `imageUrl` exists; the last
   user message additionally gets `"Current project files:\n" +
   JSON.stringify(fileData)`.
-- `POST(request)` — guards 401/400/404/402 (see above), then
+- `POST(request)` — guards 401/400/404, then **Arcjet screen**
+  (`aj.protect`: per-user bucket + `detectPromptInjectionMessage` on the
+  last user text; denial → free `429 {message, code:
+  REFUSED|RATE_LIMITED}`, no credit, no AI call), then 402, then
   `ReadableStream.start { safeEnqueue/safeClose, abort listener }`:
   1. `generateContentStream({model: gemini-3.5-flash,
      systemInstruction: SYSTEM_PROMPT, temperature: 0.7,
@@ -91,8 +94,14 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
     `Finalizing changes…`.
   - Input = `imageNote + historyBlock + "User request: …"`;
     `result.status === "failed"` → max-iterations-shaped → throw
-    `MaxIterationsError`, else throw raw message; success →
+    `MaxIterationsError`, else throw raw message; success → **no-op
+    short-circuit** (no changed paths and no dep changes → free `done`
+    with current `fileData` and pre-run credits, no transaction) else
     `finishRun(finalSummary || outputText || "Done.", false)`.
+  - System prompt additionally carries a REFUSALS/NO-OP rule: secret/
+    system-prompt asks, pure questions, chit-chat, explicit no-change →
+    immediate `done_improving` with NO `update_file` calls and a
+    `NO_OP: …` summary; never reveal or paraphrase instructions.
   - `catch`: quota → `QUOTA_EXCEEDED` error; `MaxIterationsError` →
     changes ? `finishRun(partialNote, true)` (1 credit, save failure falls
     back to free `MAX_ITERATIONS` error) : free `MAX_ITERATIONS` error;
