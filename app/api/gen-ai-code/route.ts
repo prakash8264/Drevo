@@ -47,6 +47,31 @@ function quotaErrorPayload(err: unknown): Record<string, unknown> {
   };
 }
 
+// ─── Model-overload detection ─────────────────────────────────────────────────
+// Distinct from quota: Google answers 503 UNAVAILABLE ("high demand") when the
+// model itself is saturated. Same handling otherwise — friendly retriable
+// error, no credit deducted (thrown before the DB transaction either way).
+// The ApiError in the log carries status: 503 plus the UNAVAILABLE body.
+
+function isOverloadedError(err: unknown): boolean {
+  const status =
+    (err as { status?: number })?.status ??
+    (err as { statusCode?: number })?.statusCode;
+  if (status === 503) return true;
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /unavailable|overloaded|high demand|try again later|capacity|\b503\b/i.test(
+    msg
+  );
+}
+
+function overloadErrorPayload(): Record<string, unknown> {
+  return {
+    message:
+      "The AI model is experiencing high demand right now. Please wait a bit and try again — no credits were deducted.",
+    code: "MODEL_OVERLOADED",
+  };
+}
+
 // ─── Extract short label from a Gemini thought chunk ─────────────────────────
 // Gemini thoughts often start with a bold heading like **Verify Config**
 // We extract that. If no bold heading, take the first sentence only.
@@ -239,50 +264,133 @@ export async function POST(request: NextRequest) {
       // If the client aborts (Stop button / navigation), stop enqueueing.
       request.signal.addEventListener("abort", safeClose);
 
+      // Sleep that wakes early on client abort (Stop button / navigation).
+      const sleepOrAbort = (ms: number) =>
+        new Promise<"slept" | "aborted">((resolve) => {
+          if (request.signal.aborted) return resolve("aborted");
+          const timer = setTimeout(() => resolve("slept"), ms);
+          request.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve("aborted");
+            },
+            { once: true }
+          );
+        });
+      // 2s, 4s, 8s (capped) + up to 1s jitter.
+      const backoffMs = (attempt: number) =>
+        Math.min(8000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 1000);
+
       try {
         const contents = buildContents(messages, fileData);
 
-        const geminiStream = await ai.models.generateContentStream({
-          model: "gemini-3.5-flash",
-          contents,
-          config: {
-            systemInstruction: SYSTEM_PROMPT,
-            temperature: 0.7,
-            responseMimeType: "application/json",
-            thinkingConfig: {
-              includeThoughts: true,
-            },
-          },
-        });
+        // ── Retried generation ─────────────────────────────────────────
+        // Google sheds load with 503 UNAVAILABLE both at call time and
+        // mid-stream (structured-output + thinking streams are held open,
+        // then cut — the partial JSON is unusable, so every attempt starts
+        // from scratch and emits a status so the wait isn't silent). Only
+        // overload-shaped errors retry here; quota errors keep their
+        // friendly countdown below, and aborts break out immediately.
+        const MAX_ATTEMPTS = 3;
+        const runStream = async (modelName: string): Promise<string | null> => {
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            // Tracks whether any chunk arrived, so the log can tell an
+            // at-call rejection apart from a mid-stream shed.
+            let sawChunks = false;
+            try {
+              const geminiStream = await ai.models.generateContentStream({
+                model: modelName,
+                contents,
+                config: {
+                  systemInstruction: SYSTEM_PROMPT,
+                  temperature: 0.7,
+                  responseMimeType: "application/json",
+                  thinkingConfig: {
+                    includeThoughts: true,
+                  },
+                },
+              });
 
-        let accumulated = ""; // final JSON output
-        let lastEmitTime = 0; // throttle thought emissions
+              let accumulated = ""; // final JSON output
+              let lastEmitTime = 0; // throttle thought emissions
 
-        for await (const chunk of geminiStream) {
-          if (closed || request.signal.aborted) break;
-          const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+              for await (const chunk of geminiStream) {
+                if (closed || request.signal.aborted) break;
+                sawChunks = true;
+                const parts = chunk.candidates?.[0]?.content?.parts ?? [];
 
-          for (const part of parts) {
-            if (!part.text) continue;
+                for (const part of parts) {
+                  if (!part.text) continue;
 
-            if (part.thought) {
-              // Extract just the short label — not the full wall of text
-              const now = Date.now();
-              if (now - lastEmitTime > 600) {
-                const label = extractThoughtLabel(part.text);
-                if (label) {
-                  safeEnqueue(sseEvent("status", { message: label }));
-                  lastEmitTime = now;
+                  if (part.thought) {
+                    // Extract just the short label — not the full wall of text
+                    const now = Date.now();
+                    if (now - lastEmitTime > 600) {
+                      const label = extractThoughtLabel(part.text);
+                      if (label) {
+                        safeEnqueue(sseEvent("status", { message: label }));
+                        lastEmitTime = now;
+                      }
+                    }
+                  } else {
+                    // Actual JSON output
+                    accumulated += part.text;
+                  }
                 }
               }
-            } else {
-              // Actual JSON output
-              accumulated += part.text;
+
+              if (closed || request.signal.aborted) return null;
+              return accumulated;
+            } catch (streamErr) {
+              const last = attempt === MAX_ATTEMPTS;
+              console.error(
+                `[gen-ai-code] attempt ${attempt}/${MAX_ATTEMPTS} failed (${sawChunks ? "mid-stream" : "at-call"}):`,
+                streamErr
+              );
+              if (closed || request.signal.aborted) return null;
+              if (!isOverloadedError(streamErr) || last) throw streamErr;
+              safeEnqueue(
+                sseEvent("status", {
+                  message: `Model busy — retrying… (attempt ${attempt + 1}/${MAX_ATTEMPTS})`,
+                })
+              );
+              if ((await sleepOrAbort(backoffMs(attempt))) === "aborted")
+                return null;
             }
           }
-        }
+          throw new Error("Generation failed");
+        };
 
-        if (closed || request.signal.aborted) return;
+        // Primary model first. The optional fallback (GEMINI_FALLBACK_MODEL,
+        // empty = disabled) engages only after the primary's own retries are
+        // exhausted on overloads — same prompts, same JSON contract.
+        let accumulated: string | null;
+        try {
+          accumulated = await runStream("gemini-3.5-flash");
+        } catch (primaryErr) {
+          const fallback = process.env.GEMINI_FALLBACK_MODEL?.trim();
+          if (
+            fallback &&
+            isOverloadedError(primaryErr) &&
+            !closed &&
+            !request.signal.aborted
+          ) {
+            console.error(
+              `[gen-ai-code] primary exhausted, falling back to ${fallback}`
+            );
+            safeEnqueue(
+              sseEvent("status", {
+                message: `Trying fallback model ${fallback}…`,
+              })
+            );
+            accumulated = await runStream(fallback);
+          } else {
+            throw primaryErr;
+          }
+        }
+        // null = aborted mid-run; the controller is already dead, just exit.
+        if (accumulated === null) return;
 
         // ── Parse the complete JSON response ──────────────────────────────────
 
@@ -398,6 +506,8 @@ export async function POST(request: NextRequest) {
         console.error("[gen-ai-code] stream error:", err);
         if (isQuotaError(err)) {
           safeEnqueue(sseEvent("error", quotaErrorPayload(err)));
+        } else if (isOverloadedError(err)) {
+          safeEnqueue(sseEvent("error", overloadErrorPayload()));
         } else {
           safeEnqueue(
             sseEvent("error", {

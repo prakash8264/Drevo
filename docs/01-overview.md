@@ -31,7 +31,7 @@
 | Framework | Next.js 16.3.4 (Turbopack), React 19.2.8 |
 | Auth/Billing | `@clerk/nextjs@7`, `@clerk/themes` (dark), `CheckoutButton` experimental |
 | AI generate | `@google/genai`, model `gemini-3.5-flash`, `generateContentStream`, `responseMimeType: application/json`, `thinkingConfig.includeThoughts` |
-| AI edit (2nd+ prompt) | `@cline/sdk` `Agent({providerId: gemini, maxIterations: 12})`, tools `update_file` + `add_dependency` + `done_improving`, all plans |
+| AI edit (2nd+ prompt) | `ai@7` + `@ai-sdk/google` `streamText` tool loop, tools `update_file` + `add_dependency` + `done_improving`, all plans |
 | Preview/Code | `@codesandbox/sandpack-react`, `@codesandbox/sandpack-themes` (dracula), template `react`, CDN `tailwindcss` |
 | DB | Prisma 7 + `@prisma/adapter-pg`, Postgres via Supabase pooler, custom output `lib/generated/prisma` |
 | Images | `@supabase/supabase-js`, bucket `workspace-images` |
@@ -39,7 +39,7 @@
 | Styling/UI | Tailwind 4, shadcn/ui, `next-themes`, `lucide-react`, `sonner`, `react-markdown`, `react-spinners`, `motion` |
 | Export | `jszip`, shared `lib/export-project.ts` builder |
 | GitHub | `octokit`, OAuth App (`repo read:user`), AES-256-GCM token storage |
-| Validation | `zod` (Cline tool schemas) |
+| Validation | `zod` (agent tool schemas) |
 
 ## High-level mental model
 
@@ -48,7 +48,7 @@ Prompt (page.tsx / ChatPanel)
   -> POST /api/gen-ai-code (Gemini JSON stream, SSE: status/done/error)
   -> WorkspaceClient state {messages, fileData, credits}
   -> CodePanel SandpackProvider (preview + code)
-  -> Iterate via ChatPanel: 1st prompt POST /api/gen-ai-code, follow-ups POST /api/improve (Cline agent, patch-only)
+  -> Iterate via ChatPanel: 1st prompt POST /api/gen-ai-code, follow-ups POST /api/improve (AI SDK agent, patch-only)
   -> Persisted in Prisma Workspace (+20 version snapshots), gated by credits/plan
   -> Export via buildProjectFiles(): ZIP download or GitHub push (new/existing/Update)
 ```

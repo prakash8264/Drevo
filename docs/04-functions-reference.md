@@ -25,7 +25,16 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   (`aj.protect`: per-user bucket + `detectPromptInjectionMessage` on the
   last user text; denial → free `429 {message, code:
   REFUSED|RATE_LIMITED}`, no credit, no AI call), then 402, then
-  `ReadableStream.start { safeEnqueue/safeClose, abort listener }`:
+  `ReadableStream.start { safeEnqueue/safeClose, abort listener,
+  sleepOrAbort/backoffMs }`:
+  1. `runStream(modelName)` (max 3 attempts): `generateContentStream`
+     (same config); per-attempt fresh buffer; at-call vs mid-stream shed
+     logged (`[gen-ai-code] attempt n/3 failed (…)`);
+     overload-shaped throw + attempts left → `status "Model busy —
+     retrying… (n/3)"` + backoff (2/4/8 s + jitter, abort-aware) and
+     re-issue from scratch; abort → `null`; other errors rethrow.
+     Primary `gemini-3.5-flash` first, then optional `GEMINI_FALLBACK_MODEL`
+     (empty = disabled) on overload exhaustion; `null` → silent return.
   1. `generateContentStream({model: gemini-3.5-flash,
      systemInstruction: SYSTEM_PROMPT, temperature: 0.7,
      responseMimeType: "application/json",
@@ -51,6 +60,11 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   seconds or `null`.
 - `quotaErrorPayload(err)` — `{message (with ~retry countdown when known),
   code: "QUOTA_EXCEEDED", retryAfter?}`.
+- `isOverloadedError(err)` — status 503 (or `statusCode`) / message match
+  (`unavailable|overloaded|high demand|try again later|capacity|503`) for
+  Google 503 UNAVAILABLE saturation (distinct from quota);
+  `overloadErrorPayload()` → free `{message, code: "MODEL_OVERLOADED"}`.
+  Mirrored in the improve route (plus AI SDK `statusCode`/cause unwrapping).
 - `SYSTEM_PROMPT` — exact-JSON contract (`assistantMessage/title/files/
   dependencies`), React/Tailwind rules, `/App.js` entry, all-files-on-edit.
 
@@ -62,9 +76,9 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   user message (it arrives as `userRequest`) rendered as
   `User:/Assistant:` lines; `""` when empty.
 - `validateDependencies(deps)` — identical npm check.
-- `isMaxIterationsError(message)` — regex
-  `maxIterations|max.iterations|finishReason.*max_iterations|max_iterations`.
-- `MaxIterationsError` — named `Error` subclass marking budget exhaustion.
+- `MaxIterationsError` — thrown when the loop ends without a
+  `done_improving` call (step budget hit or text ending); caught below for
+  partial-save vs free error. (Replaces the old error-string matching.)
 - `POST` — 401/404 as above; 400 unless `workspaceId + userRequest.trim()
   + fileData.files`; 402 on no credits. Then the stream:
   - Seeds `patchedFiles/patchedDependencies` from current `fileData`,
@@ -73,14 +87,21 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
     emits `file_patch{path,code,reason}` immediately, returns confirmation.
   - `add_dependency.execute({package, version="latest"})` — accumulates;
     validated in `finishRun` before save.
-  - `done_improving.execute({summary})` — sets `finalSummary`;
-    `lifecycle.completesRun: true` halts the Cline loop at once.
+  - `done_improving.execute({summary})` — sets `finalSummary`; the
+    `hasToolCall("done_improving")` stop condition ends the loop at once.
   - `fileContext` serializes all files (`// path\ncode`, `---`-joined)
-    into the system prompt (persona, constraints, package lists, 4-step
+    into the instructions text (persona, constraints, package lists, 4-step
     WORKFLOW, RULES — see 08 §2.3).
-  - `new Agent({providerId: gemini, modelId: gemini-3.5-flash,
-    maxIterations: 12, completionPolicy.requireCompletionTool,
-    tools ×3 (all autoApprove)})`.
+  - `streamText({model: google(modelName), instructions,
+    prompt: agentInput, tools ×3, toolChoice: "required",
+    stopWhen: [isStepCount(12), hasToolCall("done_improving")],
+    abortSignal: request.signal})` (AI SDK v7; `ai@7` + `@ai-sdk/google@3`).
+  - `runAgent(modelName)` (max 3 attempts, same shed-tolerance):
+    re-seeds `patchedFiles/patchedDependencies/finalSummary` per attempt
+    (shed streams may leave partial tool updates); `streamText` consume →
+    `{steps, finalText}` or `null` on abort; overload-shaped throw +
+    attempts left → `status` retry notice + abort-aware backoff and re-run.
+    Primary `gemini-3.5-flash`, then optional `GEMINI_FALLBACK_MODEL`.
   - `buildMessagesWithImage()` — reuses passed `messages` (or synthesizes
     the user message) and stamps `imageUrl` on the trailing user message.
   - `finishRun(summary, partial)` — validate deps → `newFileData` (keeps
@@ -89,15 +110,16 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
     re-read credits → `done{fileData, summary, partial, creditsRemaining}`.
   - `getChangedPaths()` — paths whose code differs from run start (edits +
     additions).
-  - `agent.subscribe`: `assistant-text-delta` → `thinking{text}`;
-    `tool-started` → `` Updating `path`… `` / `` Adding `pkg`… `` /
-    `Finalizing changes…`.
+  - `result.fullStream` consumed: `text-delta` → `thinking{text}`;
+    `tool-call` → `` Updating `path`… `` / `` Adding `pkg`… `` /
+    `Finalizing changes…` (`file_patch` is emitted inside `update_file`
+    execute, unchanged).
   - Input = `imageNote + historyBlock + "User request: …"`;
-    `result.status === "failed"` → max-iterations-shaped → throw
-    `MaxIterationsError`, else throw raw message; success → **no-op
-    short-circuit** (no changed paths and no dep changes → free `done`
-    with current `fileData` and pre-run credits, no transaction) else
-    `finishRun(finalSummary || outputText || "Done.", false)`.
+    outcome classified from `result.steps`: no `done_improving` call →
+    throw `MaxIterationsError` (budget hit or text ending); else success →
+    **no-op short-circuit** (no changed paths and no dep changes → free
+    `done` with current `fileData` and pre-run credits, no transaction) else
+    `finishRun(finalSummary || finalText || "Done.", false)`.
   - System prompt additionally carries a REFUSALS/NO-OP rule: secret/
     system-prompt asks, pure questions, chit-chat, explicit no-change →
     immediate `done_improving` with NO `update_file` calls and a

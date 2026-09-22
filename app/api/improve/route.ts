@@ -1,6 +1,9 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
-import { Agent, createTool } from "@cline/sdk";
+// Vercel AI SDK v7 (replaces @cline/sdk): streamText runs the tool loop,
+// tool() defines the three agent tools, stepCountIs/hasToolCall bound it.
+import { streamText, tool, stepCountIs, hasToolCall } from "ai";
+import { google } from "@ai-sdk/google";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
@@ -61,7 +64,15 @@ function getQuotaRetryAfter(message: string): number | null {
 }
 
 function isQuotaError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err ?? "");
+  // AI SDK v7 surfaces provider failures as typed errors (e.g. AI_APICallError
+  // carries statusCode). Check that first, then fall back to the same message
+  // regex the Cline SDK path used, including the nested cause chain.
+  const statusCode = (err as { statusCode?: number })?.statusCode;
+  if (statusCode === 429) return true;
+  const cause = (err as { cause?: unknown })?.cause;
+  const causeMsg = cause instanceof Error ? ` ${cause.message}` : "";
+  const msg =
+    (err instanceof Error ? err.message : String(err ?? "")) + causeMsg;
   return /quota|exceed.*current quota|generate_content_free_tier|rate.limit|rate_limit|429|resource exhausted/i.test(
     msg
   );
@@ -79,17 +90,38 @@ function quotaErrorPayload(err: unknown): Record<string, unknown> {
   };
 }
 
-// ─── Max-iterations helpers ───────────────────────────────────────────────────
-// The agent loop caps model calls (maxIterations). A "UI overhaul" style
-// request spanning many files can exhaust the budget before done_improving
-// is called. That throws before the DB transaction, so nothing is saved
-// and no credit is deducted — we just need a friendly message.
-
-function isMaxIterationsError(message: string): boolean {
-  return /maxIterations|max.iterations|finishReason.*max_iterations|max_iterations/i.test(
-    message
+// ─── Model-overload detection ─────────────────────────────────────────────────
+// Same distinction as gen-ai-code: Google 503 UNAVAILABLE ("high demand")
+// means the model is saturated, not that quota ran out. AI SDK v7 errors
+// carry statusCode, so check that alongside the message text. Free, like quota.
+function isOverloadedError(err: unknown): boolean {
+  const status =
+    (err as { status?: number })?.status ??
+    (err as { statusCode?: number })?.statusCode;
+  if (status === 503) return true;
+  const cause = (err as { cause?: unknown })?.cause;
+  const causeMsg = cause instanceof Error ? ` ${cause.message}` : "";
+  const msg =
+    (err instanceof Error ? err.message : String(err ?? "")) + causeMsg;
+  return /unavailable|overloaded|high demand|try again later|capacity|503/i.test(
+    msg
   );
 }
+
+function overloadErrorPayload(): Record<string, unknown> {
+  return {
+    message:
+      "The AI model is experiencing high demand right now. Please wait a bit and try again. No credits were deducted.",
+    code: "MODEL_OVERLOADED",
+  };
+}
+
+// ─── Budget-exhaustion marker ─────────────────────────────────────────────────
+// The AI SDK loop ends without calling done_improving when the step budget
+// (isStepCount) trips — or the model ends with text instead of the completion
+// tool. Either way we throw this (instead of matching error strings like the
+// old Cline path did) so the catch below partial-saves completed work or
+// sends the free friendly error when nothing changed.
 
 class MaxIterationsError extends Error {
   constructor() {
@@ -177,9 +209,9 @@ export async function POST(request: NextRequest) {
       // The agent calls this once per file it wants to change.
       // We immediately emit a file_patch SSE event so Sandpack
       // updates live in the browser as each file is patched.
+      // (AI SDK v7: tool() with a zod inputSchema, same shape Cline used.)
 
-      const updateFileTool = createTool({
-        name: "update_file",
+      const updateFileTool = tool({
         description:
           "Update or rewrite a file in the React sandbox. Call once per file you need to change.",
         inputSchema: z.object({
@@ -191,7 +223,7 @@ export async function POST(request: NextRequest) {
             .string()
             .describe("One sentence explaining what you changed and why"),
         }),
-        async execute({ path, code, reason }) {
+        execute: async ({ path, code, reason }) => {
           patchedFiles[path] = { code };
           // Emit live patch — client applies it to Sandpack immediately
           safeEnqueue(sseEvent("file_patch", { path, code, reason }));
@@ -202,9 +234,9 @@ export async function POST(request: NextRequest) {
       // ── Tool 2: add_dependency ───────────────────────────────────────────
       // Lets the agent add an npm package when the edit needs one
       // (e.g. framer-motion). Validated against npm registry before save.
+      // (AI SDK v7: tool() with a zod inputSchema, same shape Cline used.)
 
-      const addDependencyTool = createTool({
-        name: "add_dependency",
+      const addDependencyTool = tool({
         description:
           "Add an npm package the edited code needs. Only use packages that exist on npm.",
         inputSchema: z.object({
@@ -216,19 +248,18 @@ export async function POST(request: NextRequest) {
             .default("latest")
             .describe("Version range, default latest"),
         }),
-        async execute({ package: pkg, version }) {
+        execute: async ({ package: pkg, version }) => {
           patchedDependencies[pkg] = version || "latest";
           return `Added dependency ${pkg}@${version || "latest"}`;
         },
       });
 
       // ── Tool 3: done_improving ───────────────────────────────────────────
-      // Agent calls this when all files are updated.
-      // lifecycle.completesRun: true tells the Cline SDK loop to stop
-      // immediately after this tool runs instead of continuing iterations.
+      // Agent calls this when all files are updated. The hasToolCall stop
+      // condition below ends the AI SDK loop right after this tool runs,
+      // which is what lifecycle.completesRun did in the Cline SDK.
 
-      const doneImprovingTool = createTool({
-        name: "done_improving",
+      const doneImprovingTool = tool({
         description: "Call this when you have finished making all changes.",
         inputSchema: z.object({
           summary: z
@@ -237,8 +268,7 @@ export async function POST(request: NextRequest) {
               "A short friendly summary of all the changes you made (1-3 sentences)"
             ),
         }),
-        lifecycle: { completesRun: true },
-        async execute({ summary }) {
+        execute: async ({ summary }) => {
           finalSummary = summary;
           return "Done.";
         },
@@ -252,22 +282,11 @@ export async function POST(request: NextRequest) {
         .map(([path, { code }]) => `// ${path}\n${code}`)
         .join("\n\n---\n\n");
 
-      const agent = new Agent({
-        providerId: "gemini",
-        modelId: "gemini-3.5-flash",
-        apiKey: process.env.GEMINI_API_KEY!,
-        // 12 turns: UI improvements often touch 2-4 files (1 turn each)
-        // plus thinking turns. Simple edits still stop early via
-        // done_improving (completesRun), so this only costs more on
-        // genuinely complex edits.
-        maxIterations: 12,
-        // Require the completion tool: if the model tries to end its turn
-        // with plain text instead of calling done_improving, the runtime
-        // nudges it to continue instead of exiting early with no edits.
-        completionPolicy: {
-          requireCompletionTool: true,
-        },
-        systemPrompt: `You are an expert React developer editing a live browser preview app via chat.
+      // ── Agent instructions (system prompt) ─────────────────────────────────
+      // Same text the Cline SDK received as systemPrompt. In AI SDK v7 the
+      // option is called `instructions` (the old `system` name is gone), and
+      // it is passed to streamText below instead of an Agent constructor.
+      const agentInstructions = `You are an expert React developer editing a live browser preview app via chat.
 
 The app uses React (functional components), Tailwind CSS for styling, and runs in Sandpack.
 You CANNOT use TypeScript, CSS modules, or real npm install.
@@ -295,15 +314,9 @@ RULES:
 - Keep all existing functionality unless asked to remove it.
 - The entry point is always /App.js with a default export.
 - All imports must reference files you've updated or packages in the available/installed list.
-- If the user message looks like a preview error + stack trace, fix the root cause, don't just hide it.`,
-        tools: [updateFileTool, addDependencyTool, doneImprovingTool],
-        // Auto-approve all tools — no human-in-the-loop needed in this context
-        toolPolicies: {
-          update_file: { autoApprove: true },
-          add_dependency: { autoApprove: true },
-          done_improving: { autoApprove: true },
-        },
-      });
+- If the user message looks like a preview error + stack trace, fix the root cause, don't just hide it.`;
+      // Tools run automatically on execute (AI SDK default), which matches
+      // the old autoApprove: true tool policies — no human-in-the-loop here.
 
       // ── Shared finish: validate deps + save messages/fileData + done ──
       // Defined before try so both the success path and the catch
@@ -391,46 +404,10 @@ RULES:
         );
 
       try {
-        // ── Stream agent reasoning to chat panel ─────────────────────────
-        // assistant-text-delta fires as the agent types its reasoning.
-        // We emit these as "thinking" events — shown in the chat panel
-        // as a live streaming message so users see the agent working.
-
-        agent.subscribe((event) => {
-          if (event.type === "assistant-text-delta" && event.text) {
-            safeEnqueue(sseEvent("thinking", { text: event.text }));
-          }
-
-          // This fires reliably every time a tool is called
-          if (event.type === "tool-started") {
-            const name = event.toolCall?.toolName;
-            if (name === "update_file") {
-              const path =
-                (event.toolCall?.input as { path?: string })?.path ?? "a file";
-              safeEnqueue(
-                sseEvent("thinking", { text: `\n\nUpdating \`${path}\`…` })
-              );
-            } else if (name === "add_dependency") {
-              const pkg =
-                (event.toolCall?.input as { package?: string })?.package ??
-                "a package";
-              safeEnqueue(
-                sseEvent("thinking", { text: `\n\nAdding \`${pkg}\`…` })
-              );
-            } else if (name === "done_improving") {
-              safeEnqueue(
-                sseEvent("thinking", { text: "\n\nFinalizing changes…" })
-              );
-            }
-          }
-        });
-
-        // ── Run the agent ─────────────────────────────────────────────────
-        safeEnqueue(sseEvent("status", { message: "Agent working…" }));
-
-        // Build full agent input: history + image ref + current request.
+        // ── Agent input: history + image ref + current request ─────────────
         // This is the hybrid edit path — file context is already in the
-        // system prompt, so here we give conversation + intent.
+        // instructions, so here we give conversation + intent.
+        safeEnqueue(sseEvent("status", { message: "Agent working…" }));
         const conversationContext =
           messages?.length //
             ? buildConversationContext(messages)
@@ -443,19 +420,172 @@ RULES:
           : "";
         const agentInput = `${imageNote}${historyBlock}User request: ${userRequest}`;
 
-        const result = await agent.run(agentInput);
+        // Sleep that wakes early on client abort (Stop button / navigation).
+        const sleepOrAbort = (ms: number) =>
+          new Promise<"slept" | "aborted">((resolve) => {
+            if (request.signal.aborted) return resolve("aborted");
+            const timer = setTimeout(() => resolve("slept"), ms);
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve("aborted");
+              },
+              { once: true }
+            );
+          });
+        // 2s, 4s, 8s (capped) + up to 1s jitter.
+        const backoffMs = (attempt: number) =>
+          Math.min(8000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 1000);
 
-        if (result.status === "failed") {
-          const rawMessage =
-            result.error?.message ?? "Agent run failed";
-          // Iteration budget exhausted — the request was too large to
-          // finish (e.g. UI overhaul across many files). The catch below
-          // partial-saves any completed file updates (1 credit), or sends
-          // a free friendly error when nothing changed.
-          if (isMaxIterationsError(rawMessage)) {
-            throw new MaxIterationsError();
+        // ── Retried agent run ──────────────────────────────────────────
+        // Same shed-tolerance as gen-ai-code: Google 503s arrive at call
+        // time and mid-stream. Every attempt re-seeds the local accumulation
+        // maps, because a shed stream may have applied partial tool updates
+        // (and emitted file_patch events) that must not leak into the fresh
+        // attempt. Aborts break out immediately with no further attempts.
+        const MAX_ATTEMPTS = 3;
+        const runAgent = async (modelName: string) => {
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            for (const k of Object.keys(patchedFiles)) delete patchedFiles[k];
+            Object.assign(patchedFiles, fileData.files);
+            for (const k of Object.keys(patchedDependencies))
+              delete patchedDependencies[k];
+            Object.assign(patchedDependencies, fileData.dependencies);
+            finalSummary = "";
+            // Tracks whether any part arrived, so the log can tell an
+            // at-call rejection apart from a mid-stream shed.
+            let sawChunks = false;
+            try {
+              // ── Run the agent (Vercel AI SDK v7) ─────────────────────
+              // streamText runs the tool loop: each step the model either
+              // calls tools (loop continues) or writes text / hits a stopWhen
+              // condition (loop ends).
+              // - instructions: the system prompt above (v7 renamed `system`).
+              // - toolChoice "required": the model must use tools every step.
+              // - stopWhen: end after 12 steps OR as soon as done_improving
+              //   runs. - abortSignal: Stop/navigation cancels the model call
+              //   too, not just our SSE writes.
+              const result = streamText({
+                model: google(modelName),
+                instructions: agentInstructions,
+                prompt: agentInput,
+                tools: {
+                  update_file: updateFileTool,
+                  add_dependency: addDependencyTool,
+                  done_improving: doneImprovingTool,
+                },
+                toolChoice: "required",
+                stopWhen: [stepCountIs(12), hasToolCall("done_improving")],
+                abortSignal: request.signal,
+              });
+
+              // ── Forward the model stream to the chat panel ───────────
+              // Text deltas become live "thinking" text, tool calls become
+              // the friendly "Updating …" notices. Tool results need no
+              // forwarding — update_file already emitted file_patch inside
+              // its execute above.
+              for await (const part of result.fullStream) {
+                if (closed || request.signal.aborted) break;
+                sawChunks = true;
+                if (part.type === "text-delta" && part.text) {
+                  safeEnqueue(sseEvent("thinking", { text: part.text }));
+                } else if (part.type === "tool-call") {
+                  if (part.toolName === "update_file") {
+                    const path =
+                      (part.input as { path?: string } | undefined)?.path ??
+                      "a file";
+                    safeEnqueue(
+                      sseEvent("thinking", {
+                        text: `\n\nUpdating \`${path}\`…`,
+                      })
+                    );
+                  } else if (part.toolName === "add_dependency") {
+                    const pkg =
+                      (part.input as { package?: string } | undefined)
+                        ?.package ?? "a package";
+                    safeEnqueue(
+                      sseEvent("thinking", { text: `\n\nAdding \`${pkg}\`…` })
+                    );
+                  } else if (part.toolName === "done_improving") {
+                    safeEnqueue(
+                      sseEvent("thinking", {
+                        text: "\n\nFinalizing changes…",
+                      })
+                    );
+                  }
+                }
+              }
+
+              if (closed || request.signal.aborted) return null;
+              const steps = await result.steps;
+              const finalText = await result.text;
+              return { steps, finalText };
+            } catch (streamErr) {
+              const last = attempt === MAX_ATTEMPTS;
+              console.error(
+                `[improve] attempt ${attempt}/${MAX_ATTEMPTS} failed (${sawChunks ? "mid-stream" : "at-call"}):`,
+                streamErr
+              );
+              if (closed || request.signal.aborted) return null;
+              if (!isOverloadedError(streamErr) || last) throw streamErr;
+              safeEnqueue(
+                sseEvent("status", {
+                  message: `Model busy — retrying… (attempt ${attempt + 1}/${MAX_ATTEMPTS})`,
+                })
+              );
+              if ((await sleepOrAbort(backoffMs(attempt))) === "aborted")
+                return null;
+            }
           }
-          throw new Error(rawMessage);
+          throw new Error("Improve failed");
+        };
+
+        // Primary model first. The optional fallback (GEMINI_FALLBACK_MODEL,
+        // empty = disabled) engages only after the primary's own retries are
+        // exhausted on overloads — same instructions, prompt, and tools.
+        let run: Awaited<ReturnType<typeof runAgent>> | null;
+        try {
+          run = await runAgent("gemini-3.5-flash");
+        } catch (primaryErr) {
+          const fallback = process.env.GEMINI_FALLBACK_MODEL?.trim();
+          if (
+            fallback &&
+            isOverloadedError(primaryErr) &&
+            !closed &&
+            !request.signal.aborted
+          ) {
+            console.error(
+              `[improve] primary exhausted, falling back to ${fallback}`
+            );
+            safeEnqueue(
+              sseEvent("status", {
+                message: `Trying fallback model ${fallback}…`,
+              })
+            );
+            run = await runAgent(fallback);
+          } else {
+            throw primaryErr;
+          }
+        }
+        // null = aborted mid-run; the controller is already dead, just exit.
+        if (run === null) return;
+        const { steps, finalText } = run;
+
+        // ── Classify the outcome ───────────────────────────────────────────
+        // The AI SDK loop ends without calling done_improving when the step
+        // budget trips or the model ends with text instead of the completion
+        // tool (steps/finalText already came from runAgent above). So we look
+        // at what actually ran: did any step call done_improving? If not,
+        // that is the budget-exhausted case and flows into the existing
+        // MaxIterationsError handling below (partial save vs free error).
+        const doneCalled = steps.some((step) =>
+          (step.toolCalls ?? []).some(
+            (call) => call.toolName === "done_improving"
+          )
+        );
+        if (!doneCalled) {
+          throw new MaxIterationsError();
         }
 
         // No-op short-circuit: refusals, answers, and chit-chat change no
@@ -466,7 +596,8 @@ RULES:
           JSON.stringify(patchedDependencies) !==
           JSON.stringify(fileData.dependencies);
         if (runChangedPaths.length === 0 && !runDepsChanged) {
-          const noOpSummary = finalSummary || result.outputText || "Done.";
+          // v7 note: final step text replaces Cline's result.outputText.
+          const noOpSummary = finalSummary || finalText || "Done.";
           safeEnqueue(
             sseEvent("done", {
               fileData,
@@ -478,11 +609,14 @@ RULES:
           return;
         }
 
-        await finishRun(finalSummary || result.outputText || "Done.", false);
+        // v7 note: final step text replaces Cline's result.outputText.
+        await finishRun(finalSummary || finalText || "Done.", false);
       } catch (err) {
         console.error("[improve] error:", err);
         if (isQuotaError(err)) {
           safeEnqueue(sseEvent("error", quotaErrorPayload(err)));
+        } else if (isOverloadedError(err)) {
+          safeEnqueue(sseEvent("error", overloadErrorPayload()));
         } else if (err instanceof MaxIterationsError) {
           // Budget exhausted. If the agent already completed file updates,
           // keep them (partial save, 1 credit deducted like a normal run)

@@ -17,7 +17,7 @@ app/
     projects/page.tsx           Lists projects
   api/
     gen-ai-code/route.ts        Generation API (Gemini)
-    improve/route.ts            Agentic improve API (Cline)
+    improve/route.ts            Agentic improve API (AI SDK v7 streamText)
     github/
       connect/route.ts          OAuth start (state cookie -> github.com)
       callback/route.ts         OAuth callback (token exchange -> store)

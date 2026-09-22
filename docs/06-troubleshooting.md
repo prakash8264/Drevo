@@ -52,6 +52,18 @@ Fix: local const deleted; `CodePanel` imports `BASE_DEPENDENCIES` from
 initializer, so SSR (`320px`) differs from client (e.g. `537px`). Cosmetic
 warning only; no action taken.
 
+## 11. `{"error":"Forbidden"}` on `localhost:3000`, nothing else renders
+Cause: `proxy.ts` ran Arcjet (`shield` + `detectBot`, LIVE) on every request.
+Arcjet has no reputation data for the loopback client IP (`127.0.0.1`), so it
+denies localhost requests while the same request with a public IP passes
+(verified: browser-UA curl → 403, identical request + `X-Forwarded-For:
+8.8.8.8` → 200). Pure local-dev issue — production behind Vercel always sees
+real public IPs.
+Fix: `proxy.ts` skips the Arcjet check when the request host is loopback
+(`localhost`, `127.0.0.1`, `[::1]`) — Clerk auth still applies, and every
+non-localhost host always goes through Arcjet. Denials now also log
+`[proxy] Arcjet denied request:` with reason for future diagnosis.
+
 ## 10. GitHub OAuth setup pitfalls
 - `redirect_uri mismatch` on authorize → `GITHUB_REDIRECT_URI` must equal
   the app's callback URL character-for-character (scheme included).

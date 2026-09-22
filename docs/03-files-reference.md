@@ -45,8 +45,8 @@ JSON parse → npm validation → Prisma transaction
 `done`. Arcjet invocation currently commented out.
 
 ## `app/api/improve/route.ts`
-Agentic edit API for follow-up prompts (all plans). Cline `Agent`
-(`gemini-3.5-flash`, `maxIterations: 12`) with `update_file` /
+Agentic edit API for follow-up prompts (all plans). AI SDK v7 `streamText`
+(`google("gemini-3.5-flash")`, `isStepCount(12)` + `hasToolCall`) with `update_file` /
 `add_dependency` / `done_improving` tools; streams
 `thinking/file_patch/done/error`; `finishRun()` saves messages + fileData
 + snapshot + 1 credit; partial-save path when the iteration budget runs

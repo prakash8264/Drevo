@@ -1,7 +1,7 @@
 # 08 — AI Agent Deep Dive (generation, editing, tools, credits)
 
 How Drevo turns prompts into apps and edits: the one-shot generator, the
-Cline-based editing agent, every tool's lifecycle, the prompts that drive
+AI SDK editing loop, every tool's lifecycle, the prompts that drive
 them, the SSE contract, and exactly when credits move.
 
 ## 0. Two paths, one router
@@ -10,7 +10,7 @@ them, the SSE contract, and exactly when credits move.
 flowchart TD
   P[Chat prompt] --> R{workspaceId && fileData?}
   R-- no --> G[POST /api/gen-ai-code — one-shot full JSON]
-  R-- yes --> I[POST /api/improve — Cline agent patch edits]
+  R-- yes --> I[POST /api/improve — AI SDK streamText patch edits]
   G --> D1[done: full FileData]
   I --> D2[done: patched FileData]
 ```
@@ -24,7 +24,7 @@ reuse the same two handlers with `{history, appendUser: false}` so no
 duplicate user message is appended and rollback removes nothing extra.
 
 Shared model facts: `gemini-3.5-flash` via `@google/genai` (generate) and
-the Cline SDK (`providerId: "gemini"`, same model, `GEMINI_API_KEY`);
+AI SDK v7 (`ai@7` + `@ai-sdk/google`, `streamText` tool loop) for edits;
 `runtime = nodejs`, `maxDuration = 300`; SSE via `ReadableStream` with the
 safe pattern (`closed` flag, `safeEnqueue`/`safeClose`, `request.signal`
 abort listener) so aborts never crash the stream.
@@ -56,6 +56,10 @@ buildContents(messages, fileData) // user→user/model roles; image hint
 isQuotaError / getQuotaRetryAfter / quotaErrorPayload
 // detects quota/429/resource-exhausted; parses "retry in Xs";
 // builds {message, code: QUOTA_EXCEEDED, retryAfter?}.
+isOverloadedError / overloadErrorPayload
+// detects Google 503 UNAVAILABLE saturation (status or message match);
+// builds free {message, code: MODEL_OVERLOADED}. Quota and overload both
+// deduct nothing; long toast (8–15 s) for either code.
 ```
 
 ### 1.3 `SYSTEM_PROMPT` (exact-JSON contract)
@@ -84,6 +88,12 @@ ai.models.generateContentStream({
   (status pill in the UI).
 - anything else → appended to `accumulated` (the JSON document).
 - Client abort / closed controller → stop silently.
+- The call + loop live in `runStream(modelName)` (max 3 attempts):
+  overload-shaped throw at call or mid-stream → discard partial buffer,
+  `status "Model busy — retrying… (n/3)"`, abort-aware backoff + jitter,
+  re-issue from scratch; abort → `null` (silent return). Primary
+  `gemini-3.5-flash`, then optional `GEMINI_FALLBACK_MODEL` (empty =
+  disabled). Attempt outcomes logged with at-call/mid-stream cause.
 
 ### 1.5 Finish (inside one Prisma transaction)
 
@@ -97,7 +107,8 @@ ai.models.generateContentStream({
    `user.update({credits: decrement 1})`.
 5. `pruneVersions(workspaceId)` (cap 20), re-read credits,
    `done{workspaceId, assistantMessage, fileData, creditsRemaining}`.
-6. Throw → quota maps to `error QUOTA_EXCEEDED`, else generic `error`.
+6. Throw → quota maps to `error QUOTA_EXCEEDED`, overload maps to `error
+   MODEL_OVERLOADED`, else generic `error`.
    **No deduction on any failure path** — the decrement lives only in the
    success transaction. `finally safeClose()`.
 
@@ -119,7 +130,7 @@ Tools mutate these locals; `file_patch` events stream live to the UI, but
 **the client only applies patches to state at `done`** (avoids Sandpack
 remounts mid-stream). Nothing is saved until `finishRun()`.
 
-### 2.2 The three tools (`createTool`, all `autoApprove: true`)
+### 2.2 The three tools (`tool()`, auto-run on execute)
 
 **`update_file({path, code, reason})`** — `patchedFiles[path] = {code}`;
 immediately `safeEnqueue(file_patch{path, code, reason})`; returns
@@ -127,15 +138,18 @@ immediately `safeEnqueue(file_patch{path, code, reason})`; returns
 **complete** file, never a diff.
 
 ```ts
-updateFileTool = createTool({
-  name: "update_file",
+updateFileTool = tool({
+  // no name key — the key in tools: {update_file, …} is the name.
   description: "Update or rewrite a file in the React sandbox. …",
   inputSchema: z.object({ path: z.string().describe(…),
                           code: z.string().describe(…),
                           reason: z.string().describe(…) }),
-  async execute({ path, code, reason }) { … },
+  execute: async ({ path, code, reason }) => { … },
 })
 ```
+
+Tools with `execute` run automatically (the old `autoApprove: true`); no
+human-in-the-loop here and no approval config needed.
 
 **`add_dependency({package, version = "latest"})`** — accumulates into
 `patchedDependencies`; validated against the npm registry in `finishRun`
@@ -143,25 +157,29 @@ before anything is saved. Allowed set is enumerated in the system prompt
 (`lucide-react, recharts, react-router-dom, framer-motion, date-fns,
 zod, react-hook-form`, …).
 
-**`done_improving({summary})`** — sets `finalSummary`; declared with
-`lifecycle: {completesRun: true}` so the Cline loop stops immediately
+**`done_improving({summary})`** — sets `finalSummary`; the
+`hasToolCall("done_improving")` stop condition ends the loop immediately
 after it instead of burning more iterations. Refusals and no-op requests
 (system-prompt/secret asks, pure questions, chit-chat, explicit no-change)
 must call it immediately with NO `update_file` calls and a summary starting
 with `NO_OP: ` — the server short-circuits these free (see §2.5). The
 prompt also forbids revealing, quoting, or paraphrasing instructions.
 
-### 2.3 Agent construction
+### 2.3 Agent run (`streamText`, AI SDK v7)
 
 ```ts
-agent = new Agent({
-  providerId: "gemini", modelId: "gemini-3.5-flash", apiKey: GEMINI_API_KEY,
-  maxIterations: 12,            // 2–4 files ≈ 1 turn each + thinking turns
-  completionPolicy: { requireCompletionTool: true },  // plain-text endings
-  systemPrompt,                                              // get nudged on
-  tools: [updateFileTool, addDependencyTool, doneImprovingTool],
-  toolPolicies: { update_file/autoApprove, … },
+result = streamText({
+  model: google("gemini-3.5-flash"),   // @ai-sdk/google, same key/model
+  instructions: agentInstructions,     // v7 renamed `system`
+  prompt: agentInput,
+  tools: { update_file, add_dependency, done_improving },
+  toolChoice: "required",              // model must use tools every step
+  stopWhen: [isStepCount(12),          // old maxIterations budget …
+             hasToolCall("done_improving")],  // … or completion tool
+  abortSignal: request.signal,         // Stop button cancels the model too
 })
+// 12 steps: 2–4 files ≈ 1 turn each + thinking turns. Simple edits stop
+// early via done_improving, so the budget only binds complex ones.
 ```
 
 System prompt = persona + constraints (no TS/CSS-modules/npm-install) +
@@ -174,16 +192,27 @@ errors). Run input = optional image note + `Recent conversation` history
 block (all but last message, via `buildConversationContext`, itself
 `trimHistory`-bounded) + `User request:`.
 
-### 2.4 Event subscription → SSE
+### 2.4 Stream consumption → SSE (inside a retry envelope)
+
+`runAgent(modelName)` runs the consume-classify sequence up to 3 times:
+per-attempt accumulation reset, overload-shaped throw + attempts left →
+`status "Model busy — retrying…"`, abort-aware backoff, re-run; abort →
+`null`. Primary `gemini-3.5-flash`, then optional `GEMINI_FALLBACK_MODEL`.
 
 ```ts
-agent.subscribe((event) => { … })
+for await (const part of result.fullStream) { … }
 ```
 
-- `assistant-text-delta` → `thinking{text}` (streams into the placeholder
+- `text-delta` → `thinking{text}` (streams into the placeholder
   assistant bubble in `ChatPanel`).
-- `tool-started` → friendly deltas: `` Updating `path`… ``,
-  `` Adding `pkg`… ``, `Finalizing changes…`.
+- `tool-call` → friendly deltas: `` Updating `path`… ``,
+  `` Adding `pkg`… ``, `Finalizing changes…` (from `toolName` + `input`).
+  `file_patch` needs no forwarding — `update_file` emits it inside
+  `execute`, same as before.
+- Afterwards: `steps = await result.steps`, `finalText = await result.text`.
+  No `done_improving` call in any step → throw `MaxIterationsError`
+  (budget hit or text ending); the old error-string matching is gone —
+  classification now reads what actually ran.
 
 ### 2.5 `finishRun(summary, partial)`, no-op short-circuit, budget path
 

@@ -399,7 +399,7 @@ export function WorkspaceClient({
           err instanceof Error ? err.message : "Something went wrong.",
           {
             duration:
-              code === "QUOTA_EXCEEDED"
+              code === "QUOTA_EXCEEDED" || code === "MODEL_OVERLOADED"
                 ? Math.min(
                     15000,
                     Math.max(8000, (retryAfter ?? 50) * 1000)
@@ -622,7 +622,7 @@ export function WorkspaceClient({
         const retryAfter = (err as Error & { retryAfter?: number })?.retryAfter;
         toast.error(err instanceof Error ? err.message : "Improve failed.", {
           duration:
-            code === "QUOTA_EXCEEDED"
+            code === "QUOTA_EXCEEDED" || code === "MODEL_OVERLOADED"
               ? Math.min(15000, Math.max(8000, (retryAfter ?? 50) * 1000))
               : code === "MAX_ITERATIONS"
                 ? 8000
