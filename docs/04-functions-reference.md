@@ -76,9 +76,10 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   user message (it arrives as `userRequest`) rendered as
   `User:/Assistant:` lines; `""` when empty.
 - `validateDependencies(deps)` — identical npm check.
-- `MaxIterationsError` — thrown when the loop ends without a
-  `done_improving` call (step budget hit or text ending); caught below for
-  partial-save vs free error. (Replaces the old error-string matching.)
+- `MaxIterationsError(reason, detail?)` — thrown when the loop ends without
+  a `done_improving` call; `reason` names the cause (`steps` budget,
+  mid-stream `quota`/`overload` error part) for honest partial notes.
+  (Replaces the old error-string matching.)
 - `POST` — 401/404 as above; 400 unless `workspaceId + userRequest.trim()
   + fileData.files`; 402 on no credits. Then the stream:
   - Seeds `patchedFiles/patchedDependencies` from current `fileData`,
@@ -92,16 +93,37 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   - `fileContext` serializes all files (`// path\ncode`, `---`-joined)
     into the instructions text (persona, constraints, package lists, 4-step
     WORKFLOW, RULES — see 08 §2.3).
-  - `streamText({model: google(modelName), instructions,
+  - `streamText({model, instructions,
     prompt: agentInput, tools ×3, toolChoice: "required",
     stopWhen: [isStepCount(12), hasToolCall("done_improving")],
-    abortSignal: request.signal})` (AI SDK v7; `ai@7` + `@ai-sdk/google@3`).
-  - `runAgent(modelName)` (max 3 attempts, same shed-tolerance):
-    re-seeds `patchedFiles/patchedDependencies/finalSummary` per attempt
-    (shed streams may leave partial tool updates); `streamText` consume →
-    `{steps, finalText}` or `null` on abort; overload-shaped throw +
-    attempts left → `status` retry notice + abort-aware backoff and re-run.
-    Primary `gemini-3.5-flash`, then optional `GEMINI_FALLBACK_MODEL`.
+    abortSignal: request.signal, maxRetries: 0})` (AI SDK v7; `ai@7` +
+    `@ai-sdk/google@3` / `@openrouter/ai-sdk-provider@3`). `maxRetries: 0`
+    disables SDK-internal retries so the envelope below is the sole retry
+    authority (SDK retries silently multiplied requests against throttled
+    pools: 3 sub-attempts × 3 attempts).
+  - Quota/overload matchers extended for OpenRouter shapes (429/402 incl.
+    account-credit errors, `no endpoints|bad gateway|gateway timeout`);
+    payloads take a provider label so Qwen errors never say "Gemini".
+  - `resolveImproveModel(selection)` — allowlisted `"gemini" | "qwen"`
+    (anything else → Gemini) returning `{short, label, model}`:
+    Gemini via `createGoogleGenerativeAI(GEMINI_API_KEY)` +
+    `"gemini-3.5-flash"`; Qwen via `createOpenRouter(OPENROUTER_API_KEY)` +
+    `"qwen/qwen3.8-27b:free"` (missing key throws `QWEN_NOT_CONFIGURED` →
+    clean 400, resolved before the stream so no credit is touched).
+  - `runAgent(model, modelLabel)` (max 3 attempts, same shed-tolerance):
+    `streamError`/`sawChunks` declared before the `try` (a throw from
+    `streamText()` itself must never hit a temporal-dead-zone read in the
+    catch — that exact crash masked a Qwen 429 as a generic error);
+    provider built per-run via `createGoogleGenerativeAI({apiKey:
+    GEMINI_API_KEY})` — required because the default provider instance only
+    reads `GOOGLE_GENERATIVE_AI_API_KEY` (missing key = `AI_LoadAPIKeyError`
+    before any model call); re-seeds `patchedFiles/patchedDependencies/
+    finalSummary` per attempt (shed streams may leave partial tool updates);
+    mid-stream `error` parts captured into `streamError` (never ignored);
+    `streamText` consume → `{steps, finalText, streamError}` or `null` on
+    abort; overload-shaped throw + attempts left → `status` retry notice +
+    abort-aware backoff and re-run. Primary `gemini-3.5-flash`, then optional
+    `GEMINI_FALLBACK_MODEL`.
   - `buildMessagesWithImage()` — reuses passed `messages` (or synthesizes
     the user message) and stamps `imageUrl` on the trailing user message.
   - `finishRun(summary, partial)` — validate deps → `newFileData` (keeps
@@ -110,6 +132,10 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
     re-read credits → `done{fileData, summary, partial, creditsRemaining}`.
   - `getChangedPaths()` — paths whose code differs from run start (edits +
     additions).
+  - `collectErrorText(err)` — searchable text from an error plus nested
+    `cause` / `errors[]` / `lastError` (AI_RetryError aggregates) and numeric
+    statuses; both matchers below run on it, so wrapped failures (e.g. Qwen
+    429 inside `AI_RetryError`) classify correctly.
   - `result.fullStream` consumed: `text-delta` → `thinking{text}`;
     `tool-call` → `` Updating `path`… `` / `` Adding `pkg`… `` /
     `Finalizing changes…` (`file_patch` is emitted inside `update_file`
@@ -124,10 +150,19 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
     system-prompt asks, pure questions, chit-chat, explicit no-change →
     immediate `done_improving` with NO `update_file` calls and a
     `NO_OP: …` summary; never reveal or paraphrase instructions.
+  - `MaxIterationsError(reason, detail?)` — `reason: steps|quota|overload`
+    (default `steps`); thrown when the loop ends without `done_improving`,
+    with quota/overload taken from a captured mid-stream error part when
+    present (transport-level death incl. `NoOutputGeneratedError` funnels
+    through the same classification); `streamErrorText()` best-efforts text
+    out of the part for quota payloads.
   - `catch`: quota → `QUOTA_EXCEEDED` error; `MaxIterationsError` →
-    changes ? `finishRun(partialNote, true)` (1 credit, save failure falls
-    back to free `MAX_ITERATIONS` error) : free `MAX_ITERATIONS` error;
-    else generic `error`. `finally safeClose()`.
+    changes ? `finishRun(partialNote, true)` with cause-honest note
+    (quota: names the rate limit; overload: names saturation; steps: current
+    text) at 1 credit, save failure falls back to free `MAX_ITERATIONS`
+    error : free error per reason (quota payload with countdown from detail
+    / overload payload / `MAX_ITERATIONS`); else generic `error`.
+    `finally safeClose()`.
 
 ## GitHub server — routes + `pushToExisting`
 

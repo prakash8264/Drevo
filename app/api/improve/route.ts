@@ -3,7 +3,14 @@ import { NextRequest } from "next/server";
 // Vercel AI SDK v7 (replaces @cline/sdk): streamText runs the tool loop,
 // tool() defines the three agent tools, stepCountIs/hasToolCall bound it.
 import { streamText, tool, stepCountIs, hasToolCall } from "ai";
-import { google } from "@ai-sdk/google";
+// Explicit provider instances: the project names its keys GEMINI_API_KEY /
+// OPENROUTER_API_KEY, but the default provider instances only read
+// GOOGLE_GENERATIVE_AI_API_KEY / OPENROUTER_API_KEY respectively — so both
+// are constructed explicitly. (The missing-key bug this prevents once broke
+// every improve call with AI_LoadAPIKeyError before any model call.)
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
@@ -63,56 +70,126 @@ function getQuotaRetryAfter(message: string): number | null {
   return null;
 }
 
+// Collects searchable text from an error and its nested causes, including
+// AI SDK aggregate shapes (AI_RetryError.errors[], .lastError) and numeric
+// statuses. A Qwen 429 arrived wrapped exactly this way — flat message
+// matching alone could not see it.
+function collectErrorText(err: unknown, depth = 0): string {
+  if (depth > 3 || err === null || err === undefined) return "";
+  if (typeof err === "string") return err;
+  const parts: string[] = [];
+  if (err instanceof Error) {
+    parts.push(err.message);
+  } else {
+    try {
+      parts.push(JSON.stringify(err).slice(0, 2000));
+    } catch {
+      // non-serializable — fall through to structural fields below
+    }
+  }
+  const rec = err as {
+    cause?: unknown;
+    errors?: unknown;
+    lastError?: unknown;
+    statusCode?: unknown;
+    status?: unknown;
+  };
+  if (typeof rec.statusCode === "number")
+    parts.push(`statusCode ${rec.statusCode}`);
+  if (typeof rec.status === "number") parts.push(`status ${rec.status}`);
+  if (rec.cause !== undefined)
+    parts.push(collectErrorText(rec.cause, depth + 1));
+  if (Array.isArray(rec.errors))
+    for (const e of rec.errors.slice(0, 5))
+      parts.push(collectErrorText(e, depth + 1));
+  if (rec.lastError !== undefined)
+    parts.push(collectErrorText(rec.lastError, depth + 1));
+  return parts.join(" ");
+}
+
 function isQuotaError(err: unknown): boolean {
   // AI SDK v7 surfaces provider failures as typed errors (e.g. AI_APICallError
-  // carries statusCode). Check that first, then fall back to the same message
-  // regex the Cline SDK path used, including the nested cause chain.
+  // carries statusCode). Check that first, then fall back to deep text
+  // matching. Covers Gemini (429) and OpenRouter (429 rate-limit, 402
+  // account-credit) shapes.
   const statusCode = (err as { statusCode?: number })?.statusCode;
-  if (statusCode === 429) return true;
-  const cause = (err as { cause?: unknown })?.cause;
-  const causeMsg = cause instanceof Error ? ` ${cause.message}` : "";
-  const msg =
-    (err instanceof Error ? err.message : String(err ?? "")) + causeMsg;
-  return /quota|exceed.*current quota|generate_content_free_tier|rate.limit|rate_limit|429|resource exhausted/i.test(
-    msg
+  if (statusCode === 429 || statusCode === 402) return true;
+  return /quota|exceed.*current quota|generate_content_free_tier|rate.limit|rate_limit|429|resource exhausted|insufficient credits|over credit|credit limit/i.test(
+    collectErrorText(err)
   );
 }
 
-function quotaErrorPayload(err: unknown): Record<string, unknown> {
+function quotaErrorPayload(
+  err: unknown,
+  providerLabel = "Gemini"
+): Record<string, unknown> {
   const raw = err instanceof Error ? err.message : "Quota exceeded";
   const retryAfter = getQuotaRetryAfter(raw);
   return {
     message: retryAfter
-      ? `Gemini free-tier limit hit. Please retry in ~${retryAfter}s. No credits were deducted.`
-      : "Gemini free-tier limit hit. Please wait a bit and try again. No credits were deducted.",
+      ? `${providerLabel} rate limit hit. Please retry in ~${retryAfter}s. No credits were deducted.`
+      : `${providerLabel} rate limit hit. Please wait a bit and try again. No credits were deducted.`,
     code: "QUOTA_EXCEEDED",
     ...(retryAfter !== null ? { retryAfter } : {}),
   };
 }
 
 // ─── Model-overload detection ─────────────────────────────────────────────────
-// Same distinction as gen-ai-code: Google 503 UNAVAILABLE ("high demand")
-// means the model is saturated, not that quota ran out. AI SDK v7 errors
-// carry statusCode, so check that alongside the message text. Free, like quota.
+// Same distinction as gen-ai-code: 503 UNAVAILABLE means the model is
+// saturated, not that quota ran out. AI SDK v7 errors carry statusCode, so
+// check that alongside the message text (incl. OpenRouter's no-endpoints /
+// gateway phrasings). Free, like quota.
 function isOverloadedError(err: unknown): boolean {
   const status =
     (err as { status?: number })?.status ??
     (err as { statusCode?: number })?.statusCode;
   if (status === 503) return true;
-  const cause = (err as { cause?: unknown })?.cause;
-  const causeMsg = cause instanceof Error ? ` ${cause.message}` : "";
-  const msg =
-    (err instanceof Error ? err.message : String(err ?? "")) + causeMsg;
-  return /unavailable|overloaded|high demand|try again later|capacity|503/i.test(
-    msg
+  return /unavailable|overloaded|high demand|try again later|capacity|503|no endpoints|temporarily unavailable|bad gateway|gateway timeout/i.test(
+    collectErrorText(err)
   );
 }
 
-function overloadErrorPayload(): Record<string, unknown> {
+function overloadErrorPayload(
+  providerLabel = "The AI model"
+): Record<string, unknown> {
   return {
     message:
-      "The AI model is experiencing high demand right now. Please wait a bit and try again. No credits were deducted.",
+      `${providerLabel} is experiencing high demand right now. Please wait a bit and try again. No credits were deducted.`,
     code: "MODEL_OVERLOADED",
+  };
+}
+
+// ─── Edit-model registry ────────────────────────────────────────────────────
+// Generation (gen-ai-code) is always Gemini. Only improve() offers a choice,
+// toggled per prompt in the chat panel and validated to this allowlist — a
+// raw client model string is never passed to any provider.
+const GEMINI_MODEL_ID = "gemini-3.5-flash";
+const QWEN_MODEL_ID = "qwen/qwen3.8-27b:free";
+
+type EditModelId = "gemini" | "qwen";
+
+function resolveImproveModel(selection: EditModelId): {
+  short: "Gemini" | "Qwen";
+  label: string;
+  model: LanguageModel;
+} {
+  if (selection === "qwen") {
+    // Throws when unconfigured — caught below and answered with a clean
+    // QWEN_NOT_CONFIGURED 400, never a stack trace.
+    const key = process.env.OPENROUTER_API_KEY?.trim();
+    if (!key) throw new Error("QWEN_NOT_CONFIGURED");
+    return {
+      short: "Qwen",
+      label: `Qwen (${QWEN_MODEL_ID})`,
+      model: createOpenRouter({ apiKey: key })(QWEN_MODEL_ID),
+    };
+  }
+  return {
+    short: "Gemini",
+    label: `Gemini (${GEMINI_MODEL_ID})`,
+    model: createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY! })(
+      GEMINI_MODEL_ID
+    ),
   };
 }
 
@@ -124,9 +201,33 @@ function overloadErrorPayload(): Record<string, unknown> {
 // sends the free friendly error when nothing changed.
 
 class MaxIterationsError extends Error {
-  constructor() {
+  // Why the run ended without completion: exhausted step budget ("steps"),
+  // a mid-stream rate-limit error part ("quota"), or a mid-stream overload
+  // error part ("overload"). The catch below words the partial note honestly
+  // from this instead of always blaming the step budget. `detail` carries
+  // the raw stream-error text for quota payloads (retry countdowns).
+  reason: "steps" | "quota" | "overload";
+  detail?: string;
+  constructor(
+    reason: "steps" | "quota" | "overload" = "steps",
+    detail?: string
+  ) {
     super("Agent runtime exceeded maxIterations");
     this.name = "MaxIterationsError";
+    this.reason = reason;
+    this.detail = detail;
+  }
+}
+
+// Best-effort text out of a captured stream error part (v7 shape
+// {type: "error", error} where error may be a string, Error, or object).
+function streamErrorText(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  try {
+    return JSON.stringify(e ?? "").slice(0, 500);
+  } catch {
+    return "";
   }
 }
 
@@ -138,15 +239,30 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { userId, workspaceId, userRequest, imageUrl, messages, fileData } =
-    body as {
-      userId: string;
-      workspaceId: string;
-      userRequest: string; // what the user wants changed (2nd+ chat prompt)
-      imageUrl?: string; // optional screenshot / reference image
-      messages?: Message[]; // full conversation incl. new user message
-      fileData: FileData;
-    };
+  const {
+    userId,
+    workspaceId,
+    userRequest,
+    imageUrl,
+    messages,
+    fileData,
+    model: requestedModel,
+  } = body as {
+    userId: string;
+    workspaceId: string;
+    userRequest: string; // what the user wants changed (2nd+ chat prompt)
+    imageUrl?: string; // optional screenshot / reference image
+    messages?: Message[]; // full conversation incl. new user message
+    fileData: FileData;
+    // Edit-model toggle from the chat panel. Validated to an allowlist
+    // below — a raw client model string is never passed to any provider.
+    model?: string;
+  };
+
+  // Only these two edit models exist. Anything else (missing, tampered)
+  // falls back to Gemini, which is also the toggle default.
+  const editModel: "gemini" | "qwen" =
+    requestedModel === "qwen" ? "qwen" : "gemini";
 
   if (!workspaceId || !userRequest?.trim() || !fileData?.files) {
     return Response.json(
@@ -169,6 +285,35 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "Insufficient credits" }, { status: 402 });
 
   // ── Build the agent ────────────────────────────────────────────────────────
+
+  // Resolve the toggle-selected edit model up front so a misconfigured
+  // Qwen path fails fast with a clean 400 — no stream, no credit touch,
+  // and the toggle always stays honored (no silent substitution).
+  let selected: {
+    short: "Gemini" | "Qwen";
+    label: string;
+    model: LanguageModel;
+  };
+  try {
+    selected = resolveImproveModel(editModel);
+  } catch (resolveErr) {
+    if (
+      resolveErr instanceof Error &&
+      resolveErr.message === "QWEN_NOT_CONFIGURED"
+    ) {
+      return Response.json(
+        {
+          message:
+            "Qwen edits aren't configured on this server yet. Switch back to Gemini or ask the owner to add an OpenRouter key.",
+          code: "QWEN_NOT_CONFIGURED",
+        },
+        { status: 400 }
+      );
+    }
+    throw resolveErr;
+  }
+  // Short provider name for user-facing error payloads below.
+  const providerShort = selected.short;
 
   const encoder = new TextEncoder();
 
@@ -445,7 +590,9 @@ RULES:
         // (and emitted file_patch events) that must not leak into the fresh
         // attempt. Aborts break out immediately with no further attempts.
         const MAX_ATTEMPTS = 3;
-        const runAgent = async (modelName: string) => {
+        // Takes a resolved model (never a raw string) so the toggle above is
+        // the only place provider construction happens.
+        const runAgent = async (model: LanguageModel, modelLabel: string) => {
           for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             for (const k of Object.keys(patchedFiles)) delete patchedFiles[k];
             Object.assign(patchedFiles, fileData.files);
@@ -453,9 +600,15 @@ RULES:
               delete patchedDependencies[k];
             Object.assign(patchedDependencies, fileData.dependencies);
             finalSummary = "";
-            // Tracks whether any part arrived, so the log can tell an
-            // at-call rejection apart from a mid-stream shed.
+            // Declared BEFORE the try (not beside the loop): the catch below
+            // reads both, and anything throwing above their declaration —
+            // e.g. streamText() itself — would otherwise crash the catch
+            // with a temporal-dead-zone ReferenceError, masking the real
+            // error and killing the retry loop on attempt 1.
+            // sawChunks tells at-call rejections apart from mid-stream sheds.
+            // streamError holds a captured mid-stream error part, if any.
             let sawChunks = false;
+            let streamError: unknown = null;
             try {
               // ── Run the agent (Vercel AI SDK v7) ─────────────────────
               // streamText runs the tool loop: each step the model either
@@ -466,8 +619,13 @@ RULES:
               // - stopWhen: end after 12 steps OR as soon as done_improving
               //   runs. - abortSignal: Stop/navigation cancels the model call
               //   too, not just our SSE writes.
+              // - maxRetries 0: the SDK must NOT retry internally — our
+              //   envelope above is the sole retry authority (honest logging,
+              //   user-visible status, backoff). SDK-level retries would
+              //   silently multiply requests against throttled pools (we
+              //   observed 3 hidden sub-attempts per attempt = 9 hits/click).
               const result = streamText({
-                model: google(modelName),
+                model,
                 instructions: agentInstructions,
                 prompt: agentInput,
                 tools: {
@@ -478,6 +636,7 @@ RULES:
                 toolChoice: "required",
                 stopWhen: [stepCountIs(12), hasToolCall("done_improving")],
                 abortSignal: request.signal,
+                maxRetries: 0,
               });
 
               // ── Forward the model stream to the chat panel ───────────
@@ -485,11 +644,17 @@ RULES:
               // the friendly "Updating …" notices. Tool results need no
               // forwarding — update_file already emitted file_patch inside
               // its execute above.
+              // Error parts (e.g. a mid-stream 429/503 delivered as data
+              // rather than a throw) are captured into the streamError
+              // declared above — never silently ignored — so the outcome
+              // classification below can name the true cause.
               for await (const part of result.fullStream) {
                 if (closed || request.signal.aborted) break;
                 sawChunks = true;
                 if (part.type === "text-delta" && part.text) {
                   safeEnqueue(sseEvent("thinking", { text: part.text }));
+                } else if (part.type === "error") {
+                  streamError = (part as { error?: unknown }).error ?? part;
                 } else if (part.type === "tool-call") {
                   if (part.toolName === "update_file") {
                     const path =
@@ -520,14 +685,31 @@ RULES:
               if (closed || request.signal.aborted) return null;
               const steps = await result.steps;
               const finalText = await result.text;
-              return { steps, finalText };
+              return { steps, finalText, streamError };
             } catch (streamErr) {
               const last = attempt === MAX_ATTEMPTS;
               console.error(
-                `[improve] attempt ${attempt}/${MAX_ATTEMPTS} failed (${sawChunks ? "mid-stream" : "at-call"}):`,
+                `[improve:${modelLabel}] attempt ${attempt}/${MAX_ATTEMPTS} failed (${sawChunks ? "mid-stream" : "at-call"}):`,
                 streamErr
               );
               if (closed || request.signal.aborted) return null;
+              // Transport-level death (e.g. NoOutputGeneratedError) with a
+              // captured error part: the stream, not the budget, killed the
+              // run — classify honestly. Quota never retries: every attempt
+              // burns daily units, so it converts straight to the
+              // partial-or-free handling below.
+              if (streamError !== null && isQuotaError(streamError)) {
+                throw new MaxIterationsError(
+                  "quota",
+                  streamErrorText(streamError)
+                );
+              }
+              if (streamError !== null && isOverloadedError(streamError)) {
+                throw new MaxIterationsError(
+                  "overload",
+                  streamErrorText(streamError)
+                );
+              }
               if (!isOverloadedError(streamErr) || last) throw streamErr;
               safeEnqueue(
                 sseEvent("status", {
@@ -541,15 +723,20 @@ RULES:
           throw new Error("Improve failed");
         };
 
-        // Primary model first. The optional fallback (GEMINI_FALLBACK_MODEL,
-        // empty = disabled) engages only after the primary's own retries are
-        // exhausted on overloads — same instructions, prompt, and tools.
+        // Selected model first (toggle choice, default Gemini). The optional
+        // Gemini fallback (GEMINI_FALLBACK_MODEL, empty = disabled) engages
+        // only on the Gemini path after its own retries are exhausted on
+        // overloads — same instructions, prompt, and tools. No cross-model
+        // fallback: the toggle choice is always honored.
+        // (selected was resolved before the stream started, so a
+        // misconfigured Qwen path already returned a clean 400 there.)
         let run: Awaited<ReturnType<typeof runAgent>> | null;
         try {
-          run = await runAgent("gemini-3.5-flash");
+          run = await runAgent(selected.model, selected.label);
         } catch (primaryErr) {
           const fallback = process.env.GEMINI_FALLBACK_MODEL?.trim();
           if (
+            editModel === "gemini" &&
             fallback &&
             isOverloadedError(primaryErr) &&
             !closed &&
@@ -563,28 +750,45 @@ RULES:
                 message: `Trying fallback model ${fallback}…`,
               })
             );
-            run = await runAgent(fallback);
+            const fallbackProvider = createGoogleGenerativeAI({
+              apiKey: process.env.GEMINI_API_KEY!,
+            });
+            run = await runAgent(
+              fallbackProvider(fallback),
+              `Gemini fallback (${fallback})`
+            );
           } else {
             throw primaryErr;
           }
         }
         // null = aborted mid-run; the controller is already dead, just exit.
         if (run === null) return;
-        const { steps, finalText } = run;
+        const { steps, finalText, streamError } = run;
 
         // ── Classify the outcome ───────────────────────────────────────────
         // The AI SDK loop ends without calling done_improving when the step
-        // budget trips or the model ends with text instead of the completion
-        // tool (steps/finalText already came from runAgent above). So we look
-        // at what actually ran: did any step call done_improving? If not,
-        // that is the budget-exhausted case and flows into the existing
-        // MaxIterationsError handling below (partial save vs free error).
+        // budget trips, the model ends with text instead of the completion
+        // tool, or a mid-stream error part killed the run. Name the true
+        // cause: a captured quota/overload error part outranks the generic
+        // budget-exhausted case, so the partial note below stays honest.
         const doneCalled = steps.some((step) =>
           (step.toolCalls ?? []).some(
             (call) => call.toolName === "done_improving"
           )
         );
         if (!doneCalled) {
+          if (streamError !== null && isQuotaError(streamError)) {
+            throw new MaxIterationsError(
+              "quota",
+              streamErrorText(streamError)
+            );
+          }
+          if (streamError !== null && isOverloadedError(streamError)) {
+            throw new MaxIterationsError(
+              "overload",
+              streamErrorText(streamError)
+            );
+          }
           throw new MaxIterationsError();
         }
 
@@ -612,24 +816,47 @@ RULES:
         // v7 note: final step text replaces Cline's result.outputText.
         await finishRun(finalSummary || finalText || "Done.", false);
       } catch (err) {
-        console.error("[improve] error:", err);
+        console.error(`[improve:${selected.label}] error:`, err);
         if (isQuotaError(err)) {
-          safeEnqueue(sseEvent("error", quotaErrorPayload(err)));
+          safeEnqueue(
+            sseEvent("error", quotaErrorPayload(err, providerShort))
+          );
         } else if (isOverloadedError(err)) {
-          safeEnqueue(sseEvent("error", overloadErrorPayload()));
+          safeEnqueue(
+            sseEvent(
+              "error",
+              overloadErrorPayload(
+                providerShort === "Qwen" ? "Qwen" : "The AI model"
+              )
+            )
+          );
         } else if (err instanceof MaxIterationsError) {
-          // Budget exhausted. If the agent already completed file updates,
-          // keep them (partial save, 1 credit deducted like a normal run)
-          // so the user can ask to continue instead of starting over.
-          // If nothing changed, fall through to the free friendly error.
+          // Run ended without completion. If the agent already completed
+          // file updates, keep them (partial save, 1 credit deducted like a
+          // normal run) so the user can ask to continue instead of starting
+          // over. If nothing changed, fall through to the free friendly
+          // error. The note names the true cause from err.reason instead of
+          // always blaming the step budget.
           const changedPaths = getChangedPaths();
           const depsChanged =
             JSON.stringify(patchedDependencies) !==
             JSON.stringify(fileData.dependencies);
+          const updatedList =
+            changedPaths.length > 0
+              ? changedPaths.map((p) => `\`${p}\``).join(", ")
+              : "dependencies";
           if (changedPaths.length > 0 || depsChanged) {
             try {
+              // Cause-honest note; provider-aware for the rate-limit case.
+              const rateLimitLead =
+                err.reason === "quota"
+                  ? `I applied part of your request before hitting ${providerShort}'s rate limit. `
+                  : err.reason === "overload"
+                    ? `I applied part of your request before ${providerShort === "Qwen" ? "Qwen" : "the model"} became overloaded. `
+                    : "I applied part of your request before running out of steps. ";
               const partialNote =
-                `I applied part of your request before running out of steps. Updated: ${changedPaths.length > 0 ? changedPaths.map((p) => `\`${p}\``).join(", ") : "dependencies"}. ` +
+                rateLimitLead +
+                `Updated: ${updatedList}. ` +
                 "Ask me to continue with the rest. If the preview shows errors, that's expected mid-overhaul — ask me to continue or use Fix with AI." +
                 (finalSummary ? `\n\nProgress so far: ${finalSummary}` : "");
               await finishRun(partialNote, true);
@@ -643,6 +870,27 @@ RULES:
                 })
               );
             }
+          } else if (err.reason === "quota") {
+            // Rate limit stopped an empty run: free, with countdown when the
+            // captured detail carries one.
+            safeEnqueue(
+              sseEvent(
+                "error",
+                quotaErrorPayload(
+                  new Error(err.detail || "Quota exceeded"),
+                  providerShort
+                )
+              )
+            );
+          } else if (err.reason === "overload") {
+            safeEnqueue(
+              sseEvent(
+                "error",
+                overloadErrorPayload(
+                  providerShort === "Qwen" ? "Qwen" : "The AI model"
+                )
+              )
+            );
           } else {
             safeEnqueue(
               sseEvent("error", {

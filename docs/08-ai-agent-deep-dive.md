@@ -24,7 +24,10 @@ reuse the same two handlers with `{history, appendUser: false}` so no
 duplicate user message is appended and rollback removes nothing extra.
 
 Shared model facts: `gemini-3.5-flash` via `@google/genai` (generate) and
-AI SDK v7 (`ai@7` + `@ai-sdk/google`, `streamText` tool loop) for edits;
+AI SDK v7 (`ai@7` + `@ai-sdk/google` / `@openrouter/ai-sdk-provider`,
+`streamText` tool loop) for edits; the edit model is toggle-selected per
+prompt (`resolveImproveModel`, allowlisted `gemini|qwen`, default Gemini;
+missing OpenRouter key → free `QWEN_NOT_CONFIGURED` 400 before any stream).
 `runtime = nodejs`, `maxDuration = 300`; SSE via `ReadableStream` with the
 safe pattern (`closed` flag, `safeEnqueue`/`safeClose`, `request.signal`
 abort listener) so aborts never crash the stream.
@@ -169,7 +172,8 @@ prompt also forbids revealing, quoting, or paraphrasing instructions.
 
 ```ts
 result = streamText({
-  model: google("gemini-3.5-flash"),   // @ai-sdk/google, same key/model
+  model,                        // resolved per prompt: Gemini 3.5 Flash
+                                // (default) or Qwen 3.8 27B via OpenRouter
   instructions: agentInstructions,     // v7 renamed `system`
   prompt: agentInput,
   tools: { update_file, add_dependency, done_improving },
@@ -195,9 +199,12 @@ block (all but last message, via `buildConversationContext`, itself
 ### 2.4 Stream consumption → SSE (inside a retry envelope)
 
 `runAgent(modelName)` runs the consume-classify sequence up to 3 times:
-per-attempt accumulation reset, overload-shaped throw + attempts left →
+per-attempt accumulation reset, mid-stream `error` parts captured into
+`streamError` (never ignored), overload-shaped throw + attempts left →
 `status "Model busy — retrying…"`, abort-aware backoff, re-run; abort →
 `null`. Primary `gemini-3.5-flash`, then optional `GEMINI_FALLBACK_MODEL`.
+The provider is constructed per run with the project's `GEMINI_API_KEY`
+(the default instance reads only `GOOGLE_GENERATIVE_AI_API_KEY`).
 
 ```ts
 for await (const part of result.fullStream) { … }

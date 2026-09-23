@@ -131,6 +131,7 @@ ARCJET_KEY, GEMINI_API_KEY
 NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY
 GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_REDIRECT_URI (OAuth App; callback must match)
 GITHUB_TOKEN_ENCRYPTION_KEY (AES-256-GCM key for stored GitHub tokens)
+OPENROUTER_API_KEY (Qwen edit path; empty = toggle shows "not configured", Gemini-only)
 ```
 
 ## Realtime credits model

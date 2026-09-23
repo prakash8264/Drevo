@@ -1,5 +1,9 @@
 // ─── Workspace & Chat Types ───────────────────────────────────────────────────
 
+// Edit-model toggle for follow-up improve runs. Generation (first prompt)
+// is always Gemini; only the agent patch path offers a choice.
+export type EditModelId = "gemini" | "qwen";
+
 export type MessageRole = "user" | "assistant";
 
 export interface Message {

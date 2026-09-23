@@ -20,6 +20,7 @@ import type {
   FileData,
   StatusStep,
   WorkspaceData,
+  EditModelId,
 } from "@/types/workspace";
 import type { VersionSummary } from "@/types/version";
 
@@ -28,6 +29,7 @@ export type {
   Message,
   FileData,
   StatusStep,
+  EditModelId,
 } from "@/types/workspace";
 
 interface WorkspaceClientProps {
@@ -99,6 +101,9 @@ export function WorkspaceClient({
   );
   const [isGenerating, setIsGenerating] = useState(false);  const [statusLog, setStatusLog] = useState<StatusStep[]>([]);
   const [isImproving, setIsImproving] = useState(false);
+  // Edit-model toggle (chat panel). Gemini default; only follow-up improve
+  // runs use it — first prompts always generate with Gemini.
+  const [editModel, setEditModel] = useState<EditModelId>("gemini");
   const [versions, setVersions] = useState<VersionSummary[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [githubConnected, setGithubConnected] = useState(initialGithubConnected);
@@ -240,6 +245,8 @@ export function WorkspaceClient({
   interface RunOpts {
     history?: Message[];
     appendUser?: boolean;
+    // Edit-model override. handleImprove falls back to the toggle state.
+    model?: EditModelId;
   }
 
   const handleGenerate = useCallback(
@@ -447,6 +454,8 @@ export function WorkspaceClient({
       // Roll back what this run added: user + placeholder normally,
       // placeholder only on regenerate / edit-resubmit.
       const rollbackCount = appendUser ? 2 : 1;
+      // Toggle selection, overridable per run via opts (regenerate/edit).
+      const model = opts?.model ?? editModel;
       const userMessage: Message = {
         role: "user",
         content: userRequest,
@@ -492,6 +501,7 @@ export function WorkspaceClient({
             ...(imageUrl ? { imageUrl } : {}),
             messages: conversationHistory,
             fileData: currentFileData,
+            model,
           }),
         });
 
@@ -513,7 +523,20 @@ export function WorkspaceClient({
           }
           return;
         }
-        if (!res.ok || !res.body) throw new Error("Improve failed");
+        if (!res.ok || !res.body) {
+          // Surfaces server-provided messages (e.g. QWEN_NOT_CONFIGURED)
+          // instead of a generic failure. Refund + rollback like 402.
+          const data = (await res.json().catch(() => null)) as {
+            message?: string;
+          } | null;
+          toast.error(data?.message ?? "Improve failed.");
+          setMessages((prev) => prev.slice(0, -rollbackCount));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
+          return;
+        }
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -645,6 +668,7 @@ export function WorkspaceClient({
       isGenerating,
       isImproving,
       userId,
+      editModel,
       refreshVersions,
       decrementOptimistic,
       refundOptimistic,
@@ -671,12 +695,12 @@ export function WorkspaceClient({
     if (!lastUser.content.trim()) return;
     const trimmed = current.slice(0, lastUserIdx + 1);
     setMessages(trimmed);
-    const runOpts = { history: trimmed, appendUser: false } as const;
+    const runOpts = { history: trimmed, appendUser: false, model: editModel } as const;
     if (workspaceIdRef.current && fileDataRef.current) {
       return handleImprove(lastUser.content, lastUser.imageUrl, runOpts);
     }
     return handleGenerate(lastUser.content, lastUser.imageUrl, runOpts);
-  }, [credits, isGenerating, isImproving, handleGenerate, handleImprove]);
+  }, [credits, isGenerating, isImproving, handleGenerate, handleImprove, editModel]);
 
   // Edit-and-resubmit: rewrite a user message, drop everything after it,
   // and re-run. Same routing + credit behavior as a fresh prompt.
@@ -692,13 +716,13 @@ export function WorkspaceClient({
       const updated: Message = { ...msg, content: trimmedContent };
       const trimmed = [...current.slice(0, index), updated];
       setMessages(trimmed);
-      const runOpts = { history: trimmed, appendUser: false } as const;
+      const runOpts = { history: trimmed, appendUser: false, model: editModel } as const;
       if (workspaceIdRef.current && fileDataRef.current) {
         return handleImprove(trimmedContent, updated.imageUrl, runOpts);
       }
       return handleGenerate(trimmedContent, updated.imageUrl, runOpts);
     },
-    [credits, isGenerating, isImproving, handleGenerate, handleImprove]
+    [credits, isGenerating, isImproving, handleGenerate, handleImprove, editModel]
   );
 
   // Cancel whichever stream is currently in-flight
@@ -713,19 +737,26 @@ export function WorkspaceClient({
     (error: string) => {
       const prompt = `There is an error in the preview:\n\n\`\`\`\n${error}\n\`\`\`\n\nPlease fix it.`;
       if (workspaceIdRef.current && fileDataRef.current) {
-        return handleImprove(prompt);
+        return handleImprove(prompt, undefined, { model: editModel });
       }
       return handleGenerate(prompt);
     },
-    [handleGenerate, handleImprove]
+    [handleGenerate, handleImprove, editModel]
   );
 
   // Hybrid routing: first prompt (no workspace/files yet) -> fast one-shot
-  // generation; every follow-up -> agent patch path. ChatPanel just calls
-  // whatever handler is current — it re-renders after workspaceId/fileData
-  // are set by the first generation's done event.
-  const onGenerate =
-    workspaceId && fileData ? handleImprove : handleGenerate;
+  // generation (always Gemini); every follow-up -> agent patch path with the
+  // toggle-selected edit model. ChatPanel just calls this — it re-renders
+  // after workspaceId/fileData are set by the first generation's done event.
+  const onGenerate = useCallback(
+    (prompt: string, imageUrl?: string, model?: EditModelId) => {
+      if (workspaceIdRef.current && fileDataRef.current) {
+        return handleImprove(prompt, imageUrl, { model });
+      }
+      return handleGenerate(prompt, imageUrl);
+    },
+    [handleGenerate, handleImprove]
+  );
 
   return (
     <>
@@ -752,6 +783,8 @@ export function WorkspaceClient({
             workspaceId={workspaceId}
             appTitle={fileData?.title ?? workspace?.title ?? null}
             width={chatWidth}
+            editModel={editModel}
+            onEditModelChange={setEditModel}
           />
         )}
         {!focusMode && (

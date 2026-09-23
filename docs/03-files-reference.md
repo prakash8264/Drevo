@@ -46,7 +46,8 @@ JSON parse → npm validation → Prisma transaction
 
 ## `app/api/improve/route.ts`
 Agentic edit API for follow-up prompts (all plans). AI SDK v7 `streamText`
-(`google("gemini-3.5-flash")`, `isStepCount(12)` + `hasToolCall`) with `update_file` /
+(`google("gemini-3.5-flash")` or OpenRouter `qwen/qwen3.8-27b:free` per the
+chat toggle, `isStepCount(12)` + `hasToolCall`) with `update_file` /
 `add_dependency` / `done_improving` tools; streams
 `thinking/file_patch/done/error`; `finishRun()` saves messages + fileData
 + snapshot + 1 credit; partial-save path when the iteration budget runs

@@ -19,7 +19,7 @@ import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
 import { PricingModal } from "@/components/PricingModal";
-import type { Message, StatusStep } from "@/types/workspace";
+import type { Message, StatusStep, EditModelId } from "@/types/workspace";
 import { createClient } from "@supabase/supabase-js";
 import { BrandTitle } from "./reusables";
 import { LogoMark } from "@/components/LogoMark";
@@ -36,7 +36,7 @@ interface ChatPanelProps {
   statusLog: StatusStep[];
   credits: number;
   initialPrompt: string | null;
-  onGenerate: (prompt: string, imageUrl?: string) => Promise<void>;
+  onGenerate: (prompt: string, imageUrl?: string, model?: EditModelId) => Promise<void>;
   onRegenerate: () => void;
   onEditMessage: (index: number, content: string) => void;
   onStop: () => void;
@@ -44,6 +44,9 @@ interface ChatPanelProps {
   workspaceId: string | null;
   appTitle: string | null;
   width?: number;
+  // Edit-model toggle (follow-up prompts only — first generation is Gemini).
+  editModel: EditModelId;
+  onEditModelChange: (model: EditModelId) => void;
 }
 
 export function ChatPanel({
@@ -61,6 +64,8 @@ export function ChatPanel({
   workspaceId,
   appTitle,
   width,
+  editModel,
+  onEditModelChange,
 }: ChatPanelProps) {
   const { user } = useUser();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -125,7 +130,9 @@ export function ChatPanel({
     if (!trimmed || isGenerating || isImproving || noCredits) return;
     setInput("");
     setPendingImageUrl(null);
-    await onGenerate(trimmed, pendingImageUrl ?? undefined);
+    // Toggle selection travels along; the router ignores it on the
+    // first-prompt generation path (always Gemini) and uses it on edits.
+    await onGenerate(trimmed, pendingImageUrl ?? undefined, editModel);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -476,6 +483,36 @@ export function ChatPanel({
               className="hidden"
               onChange={handleFileChange}
             />
+
+            {/* Edit-model toggle — follow-up prompts only. Shown once the
+                workspace exists (first generation is always Gemini). */}
+            {workspaceId && (
+              <div
+                className="flex items-center rounded-md border border-white/10 p-0.5"
+                title="Model used for follow-up edits"
+              >
+                {(["gemini", "qwen"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => onEditModelChange(m)}
+                    disabled={isGenerating || isImproving}
+                    title={
+                      m === "gemini"
+                        ? "Gemini 3.5 Flash (default)"
+                        : "Qwen 3.8 27B via OpenRouter (free)"
+                    }
+                    className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
+                      editModel === m
+                        ? "bg-white/10 text-white/80"
+                        : "text-white/30 hover:text-white/60"
+                    }`}
+                  >
+                    {m === "gemini" ? "Gemini" : "Qwen"}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {/* Stop button — shown while generating or improving */}
             {isGenerating || isImproving ? (

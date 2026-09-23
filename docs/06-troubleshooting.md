@@ -52,6 +52,49 @@ Fix: local const deleted; `CodePanel` imports `BASE_DEPENDENCIES` from
 initializer, so SSR (`320px`) differs from client (e.g. `537px`). Cosmetic
 warning only; no action taken.
 
+## 15. Qwen 429 masked by `ReferenceError: Cannot access 'streamError' before initialization`
+Two stacked failures: OpenRouter throttled the free shared pool
+(`limit_source: upstream_provider_shared_pool` — transient, retry succeeded
+minutes later), and our catch crashed reading `streamError` declared *after*
+the throwing `streamText()` call (TDZ), killing the retry loop on attempt 1
+with a generic toast for a quota event. Fixes: hoist `streamError`/`sawChunks`
+above the `try`; `maxRetries: 0` so our envelope is the sole retry authority
+(SDK-internal retries silently tripled requests per attempt); deep
+`collectErrorText` matching across `errors[]`/`lastError`/cause. Pool limits
+remain (OpenRouter suggests BYOK provider keys to accumulate own limits).
+
+## 14. Qwen toggle answers "not configured" / odd provider errors
+Cause: `OPENROUTER_API_KEY` empty (toggle's Qwen path returns a clean free
+`QWEN_NOT_CONFIGURED` 400 by design), or OpenRouter-side shapes (402
+account-credit, `no endpoints`, gateway errors) mapped into the existing
+quota/overload paths. Fix: add an OpenRouter key (free models cost $0 but
+still require one); check the terminal `[improve:<label>]` attempt lines to
+see which provider failed and how.
+
+## 13. Partial note blames "steps" when quota/overload killed the run
+Cause: mid-stream `error` parts were ignored, so any death without
+`done_improving` classified as budget exhaustion — right path (kept work, 1
+credit) but wrong story. Also note the free-tier daily cap surfacing here:
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier` = 20/day, and every
+attempt (including overload retries) burns units; `RetryInfo` countdowns can
+mislead on daily caps (UTC-midnight reset).
+
+## 12. `AI_UnsupportedModelVersionError: Unsupported model version v4` on every improve call
+Fix: capture `error` parts into `streamError`; `MaxIterationsError(reason,
+detail?)` carries `steps|quota|overload`; partial notes and free errors name
+the true cause (quota countdown parsed from detail when present).
+Cause: dependency drift — top-level `ai` had floated to 6.0.280 while
+`@ai-sdk/google` floated to 4.0.67 (v4-spec models), plus orphaned
+`node_modules/@cline` remnants (incl. a nested `ai@7`) left behind by an
+incomplete `npm uninstall`. A v4-spec model object handed to a v2-only core
+throws before any network call, so all 2nd+ prompts failed deterministically.
+Fix: fully remove `@cline/*` (verify `node_modules/@cline` gone from disk
+and lockfile), pin exact `ai 7.0.109` + `@ai-sdk/google 3.0.125` in
+`package.json` (JSON allows no comments — the pairing rule lives here), and
+re-verify with `tsc` (the model-assignability error is the gate) + `build`.
+Prevention: never float these two majors independently; check
+`node -e` versions after any install touching AI deps.
+
 ## 11. `{"error":"Forbidden"}` on `localhost:3000`, nothing else renders
 Cause: `proxy.ts` ran Arcjet (`shield` + `detectBot`, LIVE) on every request.
 Arcjet has no reputation data for the loopback client IP (`127.0.0.1`), so it

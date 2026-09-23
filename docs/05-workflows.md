@@ -39,7 +39,7 @@ flowchart TD
   DB --> UI[Apply fileData at once + summary replaces thinking]
 ```
 
-Routing lives in `WorkspaceClient`: no workspace/files yet -> Flow A/B (one-shot JSON); otherwise -> this flow. No separate Improve button. Patches apply at `done` to avoid Sandpack remounts mid-stream. If the step budget runs out after files changed, completed updates are kept (partial `done`, 1 credit, "ask to continue"); if nothing changed, a free friendly error is sent. Refusals and no-op requests (`NO_OP:` summaries, no changed paths/deps) resolve to a free `done` with unchanged files — no deduction, no snapshot.
+Routing lives in `WorkspaceClient`: no workspace/files yet -> Flow A/B (one-shot JSON, always Gemini); otherwise -> this flow with the toggle-selected edit model (`RunOpts.model`, default Gemini; regenerate/edit/fix reuse the toggle). No separate Improve button. Patches apply at `done` to avoid Sandpack remounts mid-stream. If the step budget runs out after files changed, completed updates are kept (partial `done`, 1 credit, "ask to continue"); if nothing changed, a free friendly error is sent. Refusals and no-op requests (`NO_OP:` summaries, no changed paths/deps) resolve to a free `done` with unchanged files — no deduction, no snapshot. The chat-panel Gemini/Qwen toggle (shown once the workspace exists) feeds `onGenerate(prompt, imageUrl?, model)`; unconfigured Qwen returns a clean free 400.
 
 ## Flow D — Preview error -> Fix with AI
 
