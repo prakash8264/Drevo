@@ -104,6 +104,35 @@ export function WorkspaceClient({
   // Edit-model toggle (chat panel). Gemini default; only follow-up improve
   // runs use it — first prompts always generate with Gemini.
   const [editModel, setEditModel] = useState<EditModelId>("gemini");
+  // Qwen free-pool budget display (display-only, never blocks sending).
+  const [qwenBudget, setQwenBudget] = useState<{
+    configured: boolean;
+    remaining: number | null;
+    limit: number | null;
+  } | null>(null);
+  const refreshQwenBudget = useCallback(async () => {
+    try {
+      const res = await fetch("/api/models/qwen-budget");
+      if (!res.ok) return;
+      setQwenBudget((await res.json()) as {
+        configured: boolean;
+        remaining: number | null;
+        limit: number | null;
+      });
+    } catch {
+      // silent — the toggle works without the numbers
+    }
+  }, []);
+  // Numbers only display while Qwen is selected: fetch on toggle (event
+  // handler, not an effect) and after every Qwen run (in the handler's
+  // finally). No mount fetch needed — Gemini is the default view.
+  const handleEditModelChange = useCallback(
+    (m: EditModelId) => {
+      setEditModel(m);
+      if (m === "qwen") refreshQwenBudget();
+    },
+    [refreshQwenBudget]
+  );
   const [versions, setVersions] = useState<VersionSummary[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [githubConnected, setGithubConnected] = useState(initialGithubConnected);
@@ -660,6 +689,8 @@ export function WorkspaceClient({
       } finally {
         improveAbortRef.current = null;
         setIsImproving(false);
+        // Qwen free-pool numbers move every run — refresh the toggle display.
+        if (model === "qwen") refreshQwenBudget();
       }
     },
     // fileData intentionally omitted — read via fileDataRef above
@@ -670,6 +701,7 @@ export function WorkspaceClient({
       userId,
       editModel,
       refreshVersions,
+      refreshQwenBudget,
       decrementOptimistic,
       refundOptimistic,
       applyAuthoritative,
@@ -784,7 +816,8 @@ export function WorkspaceClient({
             appTitle={fileData?.title ?? workspace?.title ?? null}
             width={chatWidth}
             editModel={editModel}
-            onEditModelChange={setEditModel}
+            onEditModelChange={handleEditModelChange}
+            qwenBudget={qwenBudget}
           />
         )}
         {!focusMode && (

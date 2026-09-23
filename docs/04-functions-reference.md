@@ -68,7 +68,33 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
 - `SYSTEM_PROMPT` — exact-JSON contract (`assistantMessage/title/files/
   dependencies`), React/Tailwind rules, `/App.js` entry, all-files-on-edit.
 
-## Improve API — `app/api/improve/route.ts`
+## Improve API — `app/api/improve/` (split modules; route orchestrates)
+
+- `errors.ts`: `getQuotaRetryAfter`, `collectErrorText` (nested
+  `cause`/`errors[]`/`lastError` + statuses), `isQuotaError` /
+  `quotaErrorPayload(err, label?)`, `isOverloadedError` /
+  `overloadErrorPayload(label?)` (500 mapped here: Zen gateway failures),
+  `MaxIterationsError(reason, detail?)`, `streamErrorText`.
+- `models/`: `gemini.ts` (`resolveGeminiModel(id?)`, `GEMINI_MODEL_ID`,
+  sentinel), `qwen.ts` (`resolveQwenModel`, `QWEN_MODEL_ID`, sentinel),
+  `spark.ts` (`resolveSparkModel`, `SPARK_MODEL_ID`, Zen base URL *without*
+  trailing `/responses` — the provider appends the path itself; full
+  endpoint URL would double it — Responses-only interface, sentinel),
+  `index.ts` (`resolveImproveModel` allowlist, `notConfiguredResponse`).
+- `agent-tools.ts`: `createImproveTools({files, dependencies, setSummary},
+  emitFilePatch)` → `{updateFileTool, addDependencyTool,
+  doneImprovingTool}` (`ImproveTools`); `execute` bodies identical to the
+  old inline tools.
+- `agent-prompts.ts`: `trimHistory`, `buildConversationContext`,
+  `buildFileContext`, `buildAgentInstructions({installedDependencies,
+  fileContext})`, `buildAgentInput({messages, imageUrl, userRequest})`.
+- `agent-finish.ts`: `validateDependencies` (improve-local copy, on
+  purpose), `diffPaths(current, base)`, `createFinishRun(args)` (transaction
+  + prune + re-read → returns done payload; route enqueues it).
+- `agent-run.ts`: `sleepOrAbort`/`backoffMs`, `runAgentWithRetries({model,
+  modelLabel, instructions, input, tools, abortSignal, resetRunState,
+  shouldStop, enqueue})` → `{steps, finalText, streamError} | null`
+  (max 3, `maxRetries: 0` — sole retry authority).
 
 - Same `sseEvent` + quota trio as generation.
 - `trimHistory(messages)` — identical first+last8 rule.
@@ -100,62 +126,25 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
     `@ai-sdk/google@3` / `@openrouter/ai-sdk-provider@3`). `maxRetries: 0`
     disables SDK-internal retries so the envelope below is the sole retry
     authority (SDK retries silently multiplied requests against throttled
-    pools: 3 sub-attempts × 3 attempts).
-  - Quota/overload matchers extended for OpenRouter shapes (429/402 incl.
-    account-credit errors, `no endpoints|bad gateway|gateway timeout`);
-    payloads take a provider label so Qwen errors never say "Gemini".
-  - `resolveImproveModel(selection)` — allowlisted `"gemini" | "qwen"`
-    (anything else → Gemini) returning `{short, label, model}`:
-    Gemini via `createGoogleGenerativeAI(GEMINI_API_KEY)` +
-    `"gemini-3.5-flash"`; Qwen via `createOpenRouter(OPENROUTER_API_KEY)` +
-    `"qwen/qwen3.8-27b:free"` (missing key throws `QWEN_NOT_CONFIGURED` →
-    clean 400, resolved before the stream so no credit is touched).
-  - `runAgent(model, modelLabel)` (max 3 attempts, same shed-tolerance):
-    `streamError`/`sawChunks` declared before the `try` (a throw from
-    `streamText()` itself must never hit a temporal-dead-zone read in the
-    catch — that exact crash masked a Qwen 429 as a generic error);
-    provider built per-run via `createGoogleGenerativeAI({apiKey:
-    GEMINI_API_KEY})` — required because the default provider instance only
-    reads `GOOGLE_GENERATIVE_AI_API_KEY` (missing key = `AI_LoadAPIKeyError`
-    before any model call); re-seeds `patchedFiles/patchedDependencies/
-    finalSummary` per attempt (shed streams may leave partial tool updates);
-    mid-stream `error` parts captured into `streamError` (never ignored);
-    `streamText` consume → `{steps, finalText, streamError}` or `null` on
-    abort; overload-shaped throw + attempts left → `status` retry notice +
-    abort-aware backoff and re-run. Primary `gemini-3.5-flash`, then optional
-    `GEMINI_FALLBACK_MODEL`.
-  - `buildMessagesWithImage()` — reuses passed `messages` (or synthesizes
-    the user message) and stamps `imageUrl` on the trailing user message.
-  - `finishRun(summary, partial)` — validate deps → `newFileData` (keeps
-    original title) → `updatedMessages` → transaction (workspace update +
-    pre-run version snapshot + credit decrement) → `pruneVersions` →
-    re-read credits → `done{fileData, summary, partial, creditsRemaining}`.
-  - `getChangedPaths()` — paths whose code differs from run start (edits +
-    additions).
-  - `collectErrorText(err)` — searchable text from an error plus nested
-    `cause` / `errors[]` / `lastError` (AI_RetryError aggregates) and numeric
-    statuses; both matchers below run on it, so wrapped failures (e.g. Qwen
-    429 inside `AI_RetryError`) classify correctly.
-  - `result.fullStream` consumed: `text-delta` → `thinking{text}`;
-    `tool-call` → `` Updating `path`… `` / `` Adding `pkg`… `` /
-    `Finalizing changes…` (`file_patch` is emitted inside `update_file`
-    execute, unchanged).
-  - Input = `imageNote + historyBlock + "User request: …"`;
-    outcome classified from `result.steps`: no `done_improving` call →
-    throw `MaxIterationsError` (budget hit or text ending); else success →
-    **no-op short-circuit** (no changed paths and no dep changes → free
-    `done` with current `fileData` and pre-run credits, no transaction) else
+    pools: 3 sub-attempts × 3 attempts). `resolveImproveModel` allowlist is
+    `"gemini" | "qwen" | "spark"` (anything else → Gemini); Spark resolves
+    via `models/spark.ts` (see module entries above).
+  - `POST` — 401/404 as above; 400 unless `workspaceId + userRequest.trim()
+    + fileData.files`; 402 on no credits. Then the stream: seeds
+    `patchedFiles/patchedDependencies` from current `fileData`,
+    `finalSummary = ""`; builds tools/prompts via the factories above;
+    `resolveImproveModel(editModel)` (+ `notConfiguredResponse` 400s);
+    `runAgentWithRetries({...})` (+ Gemini-only `GEMINI_FALLBACK_MODEL` on
+    overload exhaustion); outcome classified from `steps` (no
+    `done_improving` → `MaxIterationsError` with quota/overload taken from
+    a captured error part when present, else budget case); **no-op
+    short-circuit** (no changed paths and no dep changes → free `done`
+    with current `fileData` and pre-run credits, no transaction) else
     `finishRun(finalSummary || finalText || "Done.", false)`.
-  - System prompt additionally carries a REFUSALS/NO-OP rule: secret/
-    system-prompt asks, pure questions, chit-chat, explicit no-change →
-    immediate `done_improving` with NO `update_file` calls and a
-    `NO_OP: …` summary; never reveal or paraphrase instructions.
-  - `MaxIterationsError(reason, detail?)` — `reason: steps|quota|overload`
-    (default `steps`); thrown when the loop ends without `done_improving`,
-    with quota/overload taken from a captured mid-stream error part when
-    present (transport-level death incl. `NoOutputGeneratedError` funnels
-    through the same classification); `streamErrorText()` best-efforts text
-    out of the part for quota payloads.
+  - REFUSALS/NO-OP rule in instructions: secret/system-prompt asks, pure
+    questions, chit-chat, explicit no-change → immediate `done_improving`
+    with NO `update_file` calls and a `NO_OP: …` summary; never reveal or
+    paraphrase instructions.
   - `catch`: quota → `QUOTA_EXCEEDED` error; `MaxIterationsError` →
     changes ? `finishRun(partialNote, true)` with cause-honest note
     (quota: names the rate limit; overload: names saturation; steps: current
@@ -243,16 +232,26 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   toast; `AbortError` silent 1-msg rollback; else toast (5 s, 8–15 s
   quota) + rollback; `finally` resets controller/flags/log.
 - `handleImprove(userRequest, imageUrl?, opts?)` — guards (+workspace/
-  files); appends user + empty assistant placeholder; `fetch
+  files); `model = opts?.model ?? editModel` into the POST body;
+  appends user + empty assistant placeholder; `fetch
   /api/improve`; `thinking` streams into placeholder; `fileData` applies
-  once at `done` (summary replaces thinking); 402/403 toasts; abort →
-  silent `rollbackCount` (2, or 1 for regenerate/edit) rollback; errors
-  toast by code (quota 8–15 s, `MAX_ITERATIONS` 8 s) + rollback.
-- `handleRegenerate()` — last user message re-run, `appendUser: false`
-  (1 credit). `handleEditMessage(i, content)` — truncate at `i`, resubmit
-  edited message (same routing/credits as fresh).
+  once at `done` (summary replaces thinking); 402/403 toasts; non-ok JSON
+  surfaces server messages (e.g. `QWEN_NOT_CONFIGURED`) with rollback +
+  refund; abort → silent `rollbackCount` (2, or 1 for regenerate/edit)
+  rollback; errors toast by code (quota/overload 8–15 s, `MAX_ITERATIONS`
+  8 s) + rollback; `finally` refreshes the Qwen budget after Qwen runs.
+- `handleRegenerate()` — last user message re-run, `appendUser: false` +
+  current toggle model (1 credit). `handleEditMessage(i, content)` —
+  truncate at `i`, resubmit edited message (same routing/credits as fresh).
 - `handleStop()` — aborts live controller(s). `handleFixError(error)` —
-  agent path when files exist, else generation.
+  agent path (with toggle model) when files exist, else generation.
+- `onGenerate(prompt, imageUrl?, model?)` — hybrid wrapper (refs, never
+  stale): workspace + files → `handleImprove(…, {model})`, else
+  `handleGenerate` (model ignored — first prompts are always Gemini).
+- `editModel` state (`"gemini"` default) + `handleEditModelChange`
+  (fetches Qwen budget when toggled to Qwen); `refreshQwenBudget()` —
+  `GET /api/models/qwen-budget` → display-only state, called on toggle
+  and after Qwen runs (no mount fetch — Gemini is the default view).
 - `refreshVersions()` / `handleRestoreVersion()` — history list + undoable
   restore + success toast.
 - Chat-width persistence (`localStorage drevo:chat-width`, 240–560px
@@ -262,11 +261,13 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
 ## ChatPanel / CodePanel / dialog / header
 
 - ChatPanel: auto-submit of `initialPrompt` once (`hasAutoSubmittedRef`,
-  only when empty); `handleSubmit` (trimmed + pending image →
-  `onGenerate`, clears); `handleKeyDown` Enter-without-shift submits;
-  `handleFileChange` (accepts `image/*`, uploads
-  `userId/workspaceId|new/timestamp.ext` to `workspace-images`, stores
-  public URL, thumbnail preview with remove).
+  only when empty); `handleSubmit` (trimmed + pending image + toggle model →
+  `onGenerate`, clears); Gemini/Qwen segmented toggle (workspace exists
+  only) + `Qwen free: N left today` microcopy (checking / unconfigured /
+  unknown / exhausted-with-UTC-reset states); `handleKeyDown`
+  Enter-without-shift submits; `handleFileChange` (accepts `image/*`,
+  uploads `userId/workspaceId|new/timestamp.ext` to `workspace-images`,
+  stores public URL, thumbnail preview with remove).
 - CodePanel: `handleExportZip` (zips `buildProjectFiles()` map →
   `exportZipName(appTitle)` download); `handleQuickUpdate` (existing-mode
   push to linked repo, `"Update from Drevo"`, `unchanged` toast,

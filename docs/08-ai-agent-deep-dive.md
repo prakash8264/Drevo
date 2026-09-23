@@ -16,7 +16,9 @@ flowchart TD
 ```
 
 Routing lives in `WorkspaceClient`:
-`onGenerate = workspaceId && fileData ? handleImprove : handleGenerate`
+`onGenerate(prompt, imageUrl?, model?)` wrapper (refs, never stale) →
+workspace + files ? `handleImprove(…, {model})` : `handleGenerate`
+(model ignored — first prompts are always Gemini).
 (`components/WorkspaceClient.tsx`). First prompt (nothing exists yet)
 generates everything; every follow-up — chat edits, screenshot re-sends,
 **Fix with AI** — patches through the agent. Regenerate and edit-resubmit
@@ -24,10 +26,12 @@ reuse the same two handlers with `{history, appendUser: false}` so no
 duplicate user message is appended and rollback removes nothing extra.
 
 Shared model facts: `gemini-3.5-flash` via `@google/genai` (generate) and
-AI SDK v7 (`ai@7` + `@ai-sdk/google` / `@openrouter/ai-sdk-provider`,
-`streamText` tool loop) for edits; the edit model is toggle-selected per
-prompt (`resolveImproveModel`, allowlisted `gemini|qwen`, default Gemini;
-missing OpenRouter key → free `QWEN_NOT_CONFIGURED` 400 before any stream).
+AI SDK v7 (`ai@7` + provider packages, `streamText` tool loop) for edits;
+the edit model is toggle-selected per prompt (`resolveImproveModel` in
+`app/api/improve/models/`: Gemini, Qwen via OpenRouter, Spark via OpenCode
+Zen Responses endpoint; missing keys → free `*_NOT_CONFIGURED` 400 before
+any stream). Improve route file is orchestration only — engine, tools,
+prompts, persistence, errors, providers live in sibling modules (see 03).
 `runtime = nodejs`, `maxDuration = 300`; SSE via `ReadableStream` with the
 safe pattern (`closed` flag, `safeEnqueue`/`safeClose`, `request.signal`
 abort listener) so aborts never crash the stream.

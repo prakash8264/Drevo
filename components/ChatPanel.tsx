@@ -47,6 +47,12 @@ interface ChatPanelProps {
   // Edit-model toggle (follow-up prompts only — first generation is Gemini).
   editModel: EditModelId;
   onEditModelChange: (model: EditModelId) => void;
+  // Qwen free-pool budget (display-only, refreshed by the parent).
+  qwenBudget: {
+    configured: boolean;
+    remaining: number | null;
+    limit: number | null;
+  } | null;
 }
 
 export function ChatPanel({
@@ -66,6 +72,7 @@ export function ChatPanel({
   width,
   editModel,
   onEditModelChange,
+  qwenBudget,
 }: ChatPanelProps) {
   const { user } = useUser();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -487,30 +494,56 @@ export function ChatPanel({
             {/* Edit-model toggle — follow-up prompts only. Shown once the
                 workspace exists (first generation is always Gemini). */}
             {workspaceId && (
-              <div
-                className="flex items-center rounded-md border border-white/10 p-0.5"
-                title="Model used for follow-up edits"
-              >
-                {(["gemini", "qwen"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => onEditModelChange(m)}
-                    disabled={isGenerating || isImproving}
-                    title={
-                      m === "gemini"
-                        ? "Gemini 3.5 Flash (default)"
-                        : "Qwen 3.8 27B via OpenRouter (free)"
-                    }
-                    className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
-                      editModel === m
-                        ? "bg-white/10 text-white/80"
-                        : "text-white/30 hover:text-white/60"
-                    }`}
+              <div className="flex flex-col items-center gap-1">
+                <div
+                  className="flex items-center rounded-md border border-white/10 p-0.5"
+                  title="Model used for follow-up edits"
+                >
+                  {(["gemini", "qwen", "spark"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => onEditModelChange(m)}
+                      disabled={isGenerating || isImproving}
+                      title={
+                        m === "gemini"
+                          ? "Gemini 3.5 Flash (default)"
+                          : m === "qwen"
+                            ? "Qwen 3.8 27B via OpenRouter (free)"
+                            : "Muse Spark 1.3 via OpenCode Zen (free)"
+                      }
+                      className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
+                        editModel === m
+                          ? "bg-white/10 text-white/80"
+                          : "text-white/30 hover:text-white/60"
+                      }`}
+                    >
+                      {m === "gemini" ? "Gemini" : m === "qwen" ? "Qwen" : "Spark"}
+                    </button>
+                  ))}
+                </div>
+                {editModel === "spark" && (
+                  <span
+                    className="max-w-44 text-center text-[10px] leading-snug text-amber-200/60"
+                    title="Contributor Free terms: Meta may use prompts and completions to train future models"
                   >
-                    {m === "gemini" ? "Gemini" : "Qwen"}
-                  </button>
-                ))}
+                    Free via OpenCode Zen — Meta may train on prompts and code
+                    sent during edits.
+                  </span>
+                )}
+                {editModel === "qwen" && (
+                  <span className="text-[10px] text-white/25">
+                    {qwenBudget === null
+                      ? "Checking free quota…"
+                      : !qwenBudget.configured
+                        ? "Add an OpenRouter key to enable Qwen."
+                        : qwenBudget.remaining === null
+                          ? "Free quota unknown."
+                          : qwenBudget.remaining === 0
+                            ? "Qwen free: 0 left today — resets UTC midnight, Gemini unaffected."
+                            : `Qwen free: ${qwenBudget.remaining} of ${qwenBudget.limit ?? "?"} left today.`}
+                  </span>
+                )}
               </div>
             )}
 

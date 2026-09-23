@@ -71,6 +71,20 @@ quota/overload paths. Fix: add an OpenRouter key (free models cost $0 but
 still require one); check the terminal `[improve:<label>]` attempt lines to
 see which provider failed and how.
 
+## 16. Spark integration hazards (Responses-only, stall watch, rotation)
+- Wrong endpoint looks like an outage: Zen answers `/chat/completions`
+  for Muse models with a generic 500 — the provider must target
+  `https://opencode.ai/zen/v1/responses` via the `.responses()` interface.
+  And the base URL must be `…/zen/v1` (not `…/zen/v1/responses`): the
+  provider appends path `/responses` itself, doubling it otherwise.
+- Reported text→tool chain stalls on free Muse models: the Spark battery
+  leads with a multi-file batched edit — if it stalls, Spark ships
+  disabled with findings, everything else still lands.
+- Free Zen availability is time-limited and rotates without notice;
+  unknown/rotated models hit the kill-switch (clean free error prompting a
+  switch), never a crash. Dynamic unpublished quotas behave like the Qwen
+  pool (see #15).
+
 ## 13. Partial note blames "steps" when quota/overload killed the run
 Cause: mid-stream `error` parts were ignored, so any death without
 `done_improving` classified as budget exhaustion — right path (kept work, 1

@@ -17,7 +17,22 @@ app/
     projects/page.tsx           Lists projects
   api/
     gen-ai-code/route.ts        Generation API (Gemini)
-    improve/route.ts            Agentic improve API (AI SDK v7 streamText)
+    improve/route.ts            Orchestration only (~250 lines): guards → model
+      resolve → tool/prompt/finish wiring → run → classify → error map
+    errors.ts                   Error taxonomy: quota/overload matchers +
+      payloads, collectErrorText, MaxIterationsError, streamErrorText
+    models/
+      index.ts                  resolveImproveModel allowlist (raw client
+        strings never reach providers) + notConfiguredResponse 400s
+      gemini.ts                 Gemini resolver (explicit key, sentinel)
+      qwen.ts                   OpenRouter resolver (explicit key, sentinel)
+      spark.ts                  Zen resolver (Responses-only endpoint, sentinel)
+    agent-tools.ts              createImproveTools factory (3 tools)
+    agent-prompts.ts            trimHistory, contexts, instructions, input
+    agent-finish.ts             validateDependencies, diffPaths,
+      createFinishRun (transaction + done payload)
+    agent-run.ts                runAgentWithRetries (loop, forwarding,
+      classification inputs) + sleepOrAbort/backoffMs
     github/
       connect/route.ts          OAuth start (state cookie -> github.com)
       callback/route.ts         OAuth callback (token exchange -> store)
@@ -26,13 +41,15 @@ app/
       repos/route.ts            Own repos list (search)
       branches/route.ts         Branch list (owner-enforced)
       push/route.ts             Push create|existing (never force push)
+    models/
+      qwen-budget/route.ts      Qwen free-pool numbers (60s cache, key never leaves)
 actions/
   workspace.ts                  getWorkspaceUser, getWorkspaceById
   projects.ts                   getUserProjects, deleteProject
   versions.ts                   getVersions, restoreVersion, pruneVersions
 components/
-  WorkspaceClient.tsx           Orchestrator: generate/improve/stop, SSE parsing, realtime credits, GitHub state
-  ChatPanel.tsx                 Chat UI + image upload + credits badge
+  WorkspaceClient.tsx           Orchestrator: generate/improve/stop, SSE parsing, realtime credits, edit-model toggle + Qwen budget, GitHub state
+  ChatPanel.tsx                 Chat UI + image upload + credits badge + model toggle
   CodePanel.tsx                 Sandpack preview/code + Update button + export zip + GitHub dialog + error banner
   GithubPushDialog.tsx          Connect + new/existing push tabs + retry + last-push status
   Header.tsx                    Nav + LogoMark + HeaderCredits island

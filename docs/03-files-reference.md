@@ -45,11 +45,19 @@ JSON parse → npm validation → Prisma transaction
 `done`. Arcjet invocation currently commented out.
 
 ## `app/api/improve/route.ts`
-Agentic edit API for follow-up prompts (all plans). AI SDK v7 `streamText`
-(`google("gemini-3.5-flash")` or OpenRouter `qwen/qwen3.8-27b:free` per the
-chat toggle, `isStepCount(12)` + `hasToolCall`) with `update_file` /
-`add_dependency` / `done_improving` tools; streams
-`thinking/file_patch/done/error`; `finishRun()` saves messages + fileData
+Orchestration only. Guards (401/400/404/402) → `resolveImproveModel` (+
+`notConfiguredResponse` 400s) → `createImproveTools` /
+prompt builders / `createFinishRun` wiring → `runAgentWithRetries` (+
+Gemini-only `GEMINI_FALLBACK_MODEL`) → outcome classification (NO_OP,
+`done`) → cause-honest error map. Engine, tools, prompts, persistence,
+errors, providers live in sibling modules (below).
+
+## `app/api/improve/errors.ts`, `models/`, `agent-tools.ts`, `agent-prompts.ts`, `agent-finish.ts`, `agent-run.ts`
+Error taxonomy (matchers, payloads, `MaxIterationsError(reason, detail)`);
+per-model resolvers (`gemini/qwen/spark.ts` + allowlist `index.ts`);
+tool factory (3 tools, explicit state); prompt builders; finish transaction
+factory + `diffPaths`; retried tool loop + forwarding. Streams
+`thinking/file_patch/done/error`; finish saves messages + fileData
 + snapshot + 1 credit; partial-save path when the iteration budget runs
 out after files changed. Full detail in 04 + 08.
 
@@ -92,6 +100,12 @@ Error codes: `GITHUB_NOT_CONNECTED`, `GITHUB_TOKEN_INVALID`,
 `REPO_CREATED_PUSH_FAILED`, `BRANCH_DIVERGED`. No credit deduction.
 Full algorithm in [07](./07-github-integration.md).
 
+## `app/api/models/qwen-budget/route.ts`
+Free-model daily budget for the toggle microcopy. Reads OpenRouter
+`GET /api/v1/key` server-side (`{data: {limit, limit_remaining}}`,
+60s in-module cache), returns `{configured, remaining, limit}` — key never
+reaches the browser;     failures return unknown numbers, never break chat.
+
 ## `actions/workspace.ts`
 `getWorkspaceUser()` — `auth()` → DB user
 (`id/credits/plan` + GitHub token presence/username, mapped to
@@ -115,12 +129,15 @@ Both AI routes snapshot pre-run `fileData` on success.
 Client orchestrator. Holds `workspaceId, messages, fileData, credits,
 isGenerating/isImproving, statusLog`, `AbortController` refs +
 `messages/workspaceId/fileData/credits` refs against stale closures.
-Hybrid routing: no workspace/files → `handleGenerate` (one-shot JSON);
-otherwise → `handleImprove` (agent patch). Children get
+Hybrid routing via `onGenerate` wrapper (refs): no workspace/files →
+`handleGenerate` (one-shot JSON, always Gemini); otherwise →
+`handleImprove` (agent patch, toggle model). Children get
 `onGenerate/onFixError/handleStop`. Version history (`refreshVersions`,
 `handleRestoreVersion`), `handleRegenerate` (re-run last user msg,
-`appendUser: false`, 1 credit), `handleEditMessage` (truncate + resubmit),
-resizable chat (240–560px, `localStorage drevo:chat-width`), `focusMode`.
+`appendUser: false` + toggle model, 1 credit), `handleEditMessage`
+(truncate + resubmit), resizable chat (240–560px, `localStorage
+drevo:chat-width`), `focusMode`. Edit-model state (`editModel`, default
+Gemini) + Qwen budget display state (`refreshQwenBudget`, no mount fetch).
 Realtime credits: `applyCredits/decrementOptimistic/refundOptimistic/
 applyAuthoritative` + `creditsRef`, emitting every change on
 `credits-bus`. GitHub link state (`githubConnected/username/lastPush`)
@@ -130,7 +147,8 @@ passed to `CodePanel`.
 Left panel (resizable, default 320px). Auto-submits `initialPrompt` once,
 auto-resize textarea (Enter → `handleSubmit`), auto-scroll, Supabase image
 upload (`workspace-images`, `userId/workspaceId|new/timestamp.ext`)
-with preview thumbnail, credit badge via `PricingModal`, markdown
+with preview thumbnail, credit badge via `PricingModal`, Gemini/Qwen edit
+toggle + free-quota microcopy (workspace exists only), markdown
 rendering, live `thinking` bubble during improve, no-credits banner, copy
 buttons, Regenerate (1 credit), edit-and-resend (truncate + re-run),
 assistant avatar = `LogoMark sm`.
