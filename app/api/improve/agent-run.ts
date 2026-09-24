@@ -2,6 +2,7 @@ import { streamText, stepCountIs, hasToolCall } from "ai";
 import type { LanguageModel } from "ai";
 import type { ImproveTools } from "./agent-tools";
 import {
+  getRetryAfterHeader,
   isOverloadedError,
   isQuotaError,
   MaxIterationsError,
@@ -139,12 +140,13 @@ export async function runAgentWithRetries(args: AgentRunArgs) {
       // Transport-level death (e.g. NoOutputGeneratedError) with a captured
       // error part: the stream, not the budget, killed the run — classify
       // honestly instead of retrying blindly or erroring generic.
-      if (streamError !== null && isQuotaError(streamError)) {
-        throw new MaxIterationsError(
-          "quota",
-          streamErrorText(streamError)
-        );
-      }
+              if (streamError !== null && isQuotaError(streamError)) {
+                throw new MaxIterationsError(
+                  "quota",
+                  streamErrorText(streamError),
+                  getRetryAfterHeader(streamError)
+                );
+              }
       if (streamError !== null && isOverloadedError(streamError)) {
         throw new MaxIterationsError(
           "overload",

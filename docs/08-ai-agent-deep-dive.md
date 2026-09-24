@@ -28,8 +28,8 @@ duplicate user message is appended and rollback removes nothing extra.
 Shared model facts: `gemini-3.5-flash` via `@google/genai` (generate) and
 AI SDK v7 (`ai@7` + provider packages, `streamText` tool loop) for edits;
 the edit model is toggle-selected per prompt (`resolveImproveModel` in
-`app/api/improve/models/`: Gemini, Qwen via OpenRouter, Spark via OpenCode
-Zen Responses endpoint; missing keys → free `*_NOT_CONFIGURED` 400 before
+`app/api/improve/models/`: Gemini, Qwen via OpenRouter, Atria via ATRIA ASI
+chat completions; missing keys → free `*_NOT_CONFIGURED` 400 before
 any stream). Improve route file is orchestration only — engine, tools,
 prompts, persistence, errors, providers live in sibling modules (see 03).
 `runtime = nodejs`, `maxDuration = 300`; SSE via `ReadableStream` with the

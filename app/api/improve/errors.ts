@@ -12,6 +12,25 @@ export function getQuotaRetryAfter(message: string): number | null {
   return null;
 }
 
+// Retry-After response header (seconds), e.g. Atria's per-minute RPM caps
+// publish exact waits here while the body carries none. Capped at 10 min to
+// bound toast durations and any future wait logic. Header names vary by
+// provider/SDK layer, so both casings are checked.
+export function getRetryAfterHeader(err: unknown): number | null {
+  const headers = (err as { responseHeaders?: unknown })?.responseHeaders;
+  if (!headers || typeof headers !== "object") return null;
+  const raw =
+    (headers as Record<string, unknown>)["retry-after"] ??
+    (headers as Record<string, unknown>)["Retry-After"];
+  const secs =
+    typeof raw === "string"
+      ? parseInt(raw, 10)
+      : typeof raw === "number"
+        ? Math.ceil(raw)
+        : NaN;
+  return Number.isFinite(secs) && secs >= 0 ? Math.min(secs, 600) : null;
+}
+
 // Collects searchable text from an error and its nested causes, including
 // AI SDK aggregate shapes (AI_RetryError.errors[], .lastError) and numeric
 // statuses. A Qwen 429 arrived wrapped exactly this way — flat message
@@ -63,10 +82,15 @@ export function isQuotaError(err: unknown): boolean {
 
 export function quotaErrorPayload(
   err: unknown,
-  providerLabel = "Gemini"
+  providerLabel = "Gemini",
+  retryAfterHint: number | null = null
 ): Record<string, unknown> {
   const raw = err instanceof Error ? err.message : "Quota exceeded";
-  const retryAfter = getQuotaRetryAfter(raw);
+  // Body countdown first ("retry in Xs"), then an explicit hint (e.g. a
+  // Retry-After header captured at the throw site), then the error's own
+  // response headers as a last resort.
+  const retryAfter =
+    getQuotaRetryAfter(raw) ?? retryAfterHint ?? getRetryAfterHeader(err);
   // Qwen runs on a shared free pool: point at the escape hatch.
   const switchHint =
     providerLabel === "Qwen" ? " You can switch to Gemini and keep working." : "";
@@ -111,17 +135,21 @@ export class MaxIterationsError extends Error {
   // a mid-stream rate-limit error part ("quota"), or a mid-stream overload
   // error part ("overload"). The catch below words the partial note honestly
   // from this instead of always blaming the step budget. `detail` carries
-  // the raw stream-error text for quota payloads (retry countdowns).
+  // the raw stream-error text for quota payloads (retry countdowns);
+  // `retryAfter` carries a Retry-After header value when one was present.
   reason: "steps" | "quota" | "overload";
   detail?: string;
+  retryAfter?: number | null;
   constructor(
     reason: "steps" | "quota" | "overload" = "steps",
-    detail?: string
+    detail?: string,
+    retryAfter?: number | null
   ) {
     super("Agent runtime exceeded maxIterations");
     this.name = "MaxIterationsError";
     this.reason = reason;
     this.detail = detail;
+    this.retryAfter = retryAfter;
   }
 }
 

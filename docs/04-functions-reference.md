@@ -77,10 +77,10 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
   `MaxIterationsError(reason, detail?)`, `streamErrorText`.
 - `models/`: `gemini.ts` (`resolveGeminiModel(id?)`, `GEMINI_MODEL_ID`,
   sentinel), `qwen.ts` (`resolveQwenModel`, `QWEN_MODEL_ID`, sentinel),
-  `spark.ts` (`resolveSparkModel`, `SPARK_MODEL_ID`, Zen base URL *without*
-  trailing `/responses` — the provider appends the path itself; full
-  endpoint URL would double it — Responses-only interface, sentinel),
-  `index.ts` (`resolveImproveModel` allowlist, `notConfiguredResponse`).
+  `atria.ts` (`resolveAtriaModel`, `ATRIA_MODEL_ID`, standard Chat
+  Completions via `@ai-sdk/openai-compatible` — no Responses adaptation,
+  sentinel), `index.ts` (`resolveImproveModel` allowlist,
+  `notConfiguredResponse`).
 - `agent-tools.ts`: `createImproveTools({files, dependencies, setSummary},
   emitFilePatch)` → `{updateFileTool, addDependencyTool,
   doneImprovingTool}` (`ImproveTools`); `execute` bodies identical to the
@@ -127,8 +127,8 @@ Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
     disables SDK-internal retries so the envelope below is the sole retry
     authority (SDK retries silently multiplied requests against throttled
     pools: 3 sub-attempts × 3 attempts). `resolveImproveModel` allowlist is
-    `"gemini" | "qwen" | "spark"` (anything else → Gemini); Spark resolves
-    via `models/spark.ts` (see module entries above).
+    `"gemini" | "qwen" | "atria"` (anything else → Gemini); Atria resolves
+    via `models/atria.ts` (see module entries above).
   - `POST` — 401/404 as above; 400 unless `workspaceId + userRequest.trim()
     + fileData.files`; 402 on no credits. Then the stream: seeds
     `patchedFiles/patchedDependencies` from current `fileData`,

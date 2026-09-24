@@ -2,12 +2,12 @@ import type { EditModelId } from "@/types/workspace";
 import type { ResolvedImproveModel } from "./gemini";
 import { resolveGeminiModel, GEMINI_NOT_CONFIGURED } from "./gemini";
 import { resolveQwenModel, QWEN_NOT_CONFIGURED } from "./qwen";
-import { resolveSparkModel, SPARK_NOT_CONFIGURED } from "./spark";
+import { resolveAtriaModel, ATRIA_NOT_CONFIGURED } from "./atria";
 
 export {
   GEMINI_NOT_CONFIGURED,
   QWEN_NOT_CONFIGURED,
-  SPARK_NOT_CONFIGURED,
+  ATRIA_NOT_CONFIGURED,
   resolveGeminiModel,
 };
 export type { ResolvedImproveModel };
@@ -21,7 +21,7 @@ export function resolveImproveModel(
   selection: EditModelId
 ): ResolvedImproveModel {
   if (selection === "qwen") return resolveQwenModel();
-  if (selection === "spark") return resolveSparkModel();
+  if (selection === "atria") return resolveAtriaModel();
   return resolveGeminiModel();
 }
 
@@ -38,11 +38,11 @@ export function notConfiguredResponse(selection: EditModelId): {
       code: QWEN_NOT_CONFIGURED,
     };
   }
-  if (selection === "spark") {
+  if (selection === "atria") {
     return {
       message:
-        "Spark edits aren't configured on this server yet. Switch back to Gemini or ask the owner to add an OpenCode Zen key.",
-      code: SPARK_NOT_CONFIGURED,
+        "Atria edits aren't configured on this server yet. Switch back to Gemini or ask the owner to add an ATRIA_API_KEY.",
+      code: ATRIA_NOT_CONFIGURED,
     };
   }
   return {

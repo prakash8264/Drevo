@@ -26,7 +26,7 @@ app/
         strings never reach providers) + notConfiguredResponse 400s
       gemini.ts                 Gemini resolver (explicit key, sentinel)
       qwen.ts                   OpenRouter resolver (explicit key, sentinel)
-      spark.ts                  Zen resolver (Responses-only endpoint, sentinel)
+      atria.ts                  ATRIA ASI resolver (chat completions, sentinel)
     agent-tools.ts              createImproveTools factory (3 tools)
     agent-prompts.ts            trimHistory, contexts, instructions, input
     agent-finish.ts             validateDependencies, diffPaths,

@@ -71,19 +71,43 @@ quota/overload paths. Fix: add an OpenRouter key (free models cost $0 but
 still require one); check the terminal `[improve:<label>]` attempt lines to
 see which provider failed and how.
 
-## 16. Spark integration hazards (Responses-only, stall watch, rotation)
-- Wrong endpoint looks like an outage: Zen answers `/chat/completions`
-  for Muse models with a generic 500 — the provider must target
-  `https://opencode.ai/zen/v1/responses` via the `.responses()` interface.
-  And the base URL must be `…/zen/v1` (not `…/zen/v1/responses`): the
-  provider appends path `/responses` itself, doubling it otherwise.
-- Reported text→tool chain stalls on free Muse models: the Spark battery
-  leads with a multi-file batched edit — if it stalls, Spark ships
-  disabled with findings, everything else still lands.
-- Free Zen availability is time-limited and rotates without notice;
-  unknown/rotated models hit the kill-switch (clean free error prompting a
-  switch), never a crash. Dynamic unpublished quotas behave like the Qwen
-  pool (see #15).
+## 16. Spark slot replaced by Atria (was: Responses-only hazards)
+Spark (`muse-spark-1.3-contributor-free`) never shipped — its free tier is
+caller-gated to inside OpenCode (403 `FreeTierError` on any outside call;
+see #17 for the identical MiMo probe). Lessons kept for the record:
+- Wrong Zen endpoint looks like an outage: `/chat/completions` for Muse
+  models answers generic 500 — the provider must target `…/zen/v1/responses`
+  via `.responses()`, with base `…/zen/v1` (the provider appends the path;
+  a full endpoint URL doubles it).
+- Reported text→tool chain stalls on free Muse models would have made the
+  multi-file batched edit the go/no-go battery item.
+- The parked `spark.ts` was replaced by `models/atria.ts` (standard Chat
+  Completions — none of the above applies). Git history preserves the
+  Spark implementation.
+
+## 18. Atria-Dawn-Preview integration (replaces the Spark slot)
+Live probe passed first (minimal chat call, user key, HTTP 200 "OK") —
+only then was anything built. Notes:
+- Standard Chat Completions (`@ai-sdk/openai-compatible`,
+  `https://api.atria-asi.ai/v1`, exact model id `Atria-Dawn-Preview`);
+  provider requires `name` in settings (tsc gate caught the omission).
+- Text-only model: screenshots travel as URL text (compatible — no image
+  parts are ever sent), but the model cannot view images (disclosed in UI).
+- Per-minute account RPM caps publish exact `Retry-After`/`x-rpm-*`
+  headers — honored in quota payloads (body countdown → hint → header).
+- Toggle: Gemini/Qwen/Atria; no budget microcopy for Atria (per-minute
+  headers only, surfaced via toasts).
+
+## 17. MiMo-V2.6-Flash Free is caller-gated like Spark — parked
+Live probe (minimal chat-completions call, valid Zen key, 2026-09-24):
+`403 FreeTierError "OpenCode's free tier can only be used from within
+OpenCode"` — identical gate to `muse-spark-1.3-contributor-free`, despite
+MiMo using the standard chat endpoint. So the gate is per free-model
+policy, not endpoint-specific, and no request shape avoids it. Per plan:
+no code was added for MiMo (swap stopped at the probe); the Spark toggle
+slot stays as-is pending a separate decision. Legitimate alternatives
+unchanged: paid Zen models (no caller gate), Meta-direct Contributor tier,
+or more OpenRouter `:free` models through the existing Qwen plumbing.
 
 ## 13. Partial note blames "steps" when quota/overload killed the run
 Cause: mid-stream `error` parts were ignored, so any death without

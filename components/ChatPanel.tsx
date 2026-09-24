@@ -499,7 +499,7 @@ export function ChatPanel({
                   className="flex items-center rounded-md border border-white/10 p-0.5"
                   title="Model used for follow-up edits"
                 >
-                  {(["gemini", "qwen", "spark"] as const).map((m) => (
+                  {(["gemini", "qwen", "atria"] as const).map((m) => (
                     <button
                       key={m}
                       type="button"
@@ -510,7 +510,7 @@ export function ChatPanel({
                           ? "Gemini 3.5 Flash (default)"
                           : m === "qwen"
                             ? "Qwen 3.8 27B via OpenRouter (free)"
-                            : "Muse Spark 1.3 via OpenCode Zen (free)"
+                            : "Atria Dawn Preview via ATRIA ASI"
                       }
                       className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
                         editModel === m
@@ -518,17 +518,16 @@ export function ChatPanel({
                           : "text-white/30 hover:text-white/60"
                       }`}
                     >
-                      {m === "gemini" ? "Gemini" : m === "qwen" ? "Qwen" : "Spark"}
+                      {m === "gemini" ? "Gemini" : m === "qwen" ? "Qwen" : "Atria"}
                     </button>
                   ))}
                 </div>
-                {editModel === "spark" && (
+                {editModel === "atria" && (
                   <span
-                    className="max-w-44 text-center text-[10px] leading-snug text-amber-200/60"
-                    title="Contributor Free terms: Meta may use prompts and completions to train future models"
+                    className="max-w-44 text-center text-[10px] leading-snug text-white/25"
+                    title="Atria-Dawn-Preview accepts text only: attached screenshots travel as URL text the model cannot view"
                   >
-                    Free via OpenCode Zen — Meta may train on prompts and code
-                    sent during edits.
+                    Text-only model — screenshots are sent as links it can&apos;t view.
                   </span>
                 )}
                 {editModel === "qwen" && (

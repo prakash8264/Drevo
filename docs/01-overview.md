@@ -7,7 +7,7 @@
 1. User types a prompt like `Build a kanban board with drag and drop` (optionally attaches a screenshot).
 2. AI generates a complete React + Tailwind app (multiple files + npm dependencies) as JSON.
 3. The app renders instantly in a live browser preview (Sandpack) with a code viewer.
-4. User keeps chatting to iterate — follow-up prompts (and **Fix with AI**) go through the agent as patch edits for all plans, with a Gemini/Qwen/Spark toggle for the edit model — or clicks **Fix with AI** when the preview throws.
+4. User keeps chatting to iterate — follow-up prompts (and **Fix with AI**) go through the agent as patch edits for all plans, with a Gemini/Qwen/Atria toggle for the edit model — or clicks **Fix with AI** when the preview throws.
 5. User can save workspaces, browse `/projects`, and download any app as a ZIP — or push it straight to GitHub (new repo, existing repo, or one-click Update).
 6. Credit counts update instantly in the header and chat via optimistic updates (rollback on failure), no refresh needed.
 
@@ -31,7 +31,7 @@
 | Framework | Next.js 16.3.4 (Turbopack), React 19.2.8 |
 | Auth/Billing | `@clerk/nextjs@7`, `@clerk/themes` (dark), `CheckoutButton` experimental |
 | AI generate | `@google/genai`, model `gemini-3.5-flash`, `generateContentStream`, `responseMimeType: application/json`, `thinkingConfig.includeThoughts` |
-| AI edit (2nd+ prompt) | `ai@7` `streamText` tool loop, tools `update_file` + `add_dependency` + `done_improving`, all plans. Edit model toggle: Gemini 3.5 Flash (default), Qwen 3.8 27B via OpenRouter (`@openrouter/ai-sdk-provider`, free), Muse Spark 1.3 via OpenCode Zen (`@ai-sdk/openai` Responses endpoint, free, trains on data — disclosed in UI). All pinned exact (`ai 7.0.109` + `google 3.0.125` + `openrouter 3.1.0` + `openai 4.0.73`): ai@7 core accepts model-spec v2/v3 only — floating any of them reintroduces spec mismatches (see 06 #12). |
+| AI edit (2nd+ prompt) | `ai@7` `streamText` tool loop, tools `update_file` + `add_dependency` + `done_improving`, all plans. Edit model toggle: Gemini 3.5 Flash (default), Qwen 3.8 27B via OpenRouter (`@openrouter/ai-sdk-provider`, free), Atria Dawn Preview via ATRIA ASI (`@ai-sdk/openai-compatible`, text-only). All pinned exact (`ai 7.0.109` + `google 3.0.125` + `openrouter 3.1.0` + `openai-compatible 3.0.55`): ai@7 core accepts model-spec v2/v3 only — floating any of them reintroduces spec mismatches (see 06 #12). |
 | Preview/Code | `@codesandbox/sandpack-react`, `@codesandbox/sandpack-themes` (dracula), template `react`, CDN `tailwindcss` |
 | DB | Prisma 7 + `@prisma/adapter-pg`, Postgres via Supabase pooler, custom output `lib/generated/prisma` |
 | Images | `@supabase/supabase-js`, bucket `workspace-images` |

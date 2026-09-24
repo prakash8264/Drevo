@@ -4,6 +4,7 @@ import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
 import type { FileData, Message, EditModelId } from "@/types/workspace";
 import {
+  getRetryAfterHeader,
   isOverloadedError,
   isQuotaError,
   MaxIterationsError,
@@ -69,7 +70,7 @@ export async function POST(request: NextRequest) {
   // Only these edit models exist. Anything else (missing, tampered) falls
   // back to Gemini, which is also the toggle default.
   const editModel: EditModelId =
-    requestedModel === "qwen" || requestedModel === "spark"
+    requestedModel === "qwen" || requestedModel === "atria"
       ? requestedModel
       : "gemini";
 
@@ -289,7 +290,8 @@ export async function POST(request: NextRequest) {
           if (streamError !== null && isQuotaError(streamError)) {
             throw new MaxIterationsError(
               "quota",
-              streamErrorText(streamError)
+              streamErrorText(streamError),
+              getRetryAfterHeader(streamError)
             );
           }
           if (streamError !== null && isOverloadedError(streamError)) {
@@ -378,14 +380,15 @@ export async function POST(request: NextRequest) {
               );
             }
           } else if (err.reason === "quota") {
-            // Rate limit stopped an empty run: free, with countdown when the
-            // captured detail carries one.
+            // Rate limit stopped an empty run: free, with countdown from the
+            // captured detail, the throw-site header value, or the error.
             safeEnqueue(
               sseEvent(
                 "error",
                 quotaErrorPayload(
                   new Error(err.detail || "Quota exceeded"),
-                  providerShort
+                  providerShort,
+                  err.retryAfter ?? null
                 )
               )
             );

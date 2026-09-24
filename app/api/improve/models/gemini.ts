@@ -8,7 +8,7 @@ export const GEMINI_MODEL_ID = "gemini-3.5-flash";
 // `<NAME>_NOT_CONFIGURED` Error on missing keys — the route answers those
 // with a clean free 400, never a stack trace.
 export interface ResolvedImproveModel {
-  short: "Gemini" | "Qwen" | "Spark";
+  short: "Gemini" | "Qwen" | "Atria";
   label: string;
   model: LanguageModel;
 }

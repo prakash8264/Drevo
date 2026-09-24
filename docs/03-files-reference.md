@@ -54,7 +54,7 @@ errors, providers live in sibling modules (below).
 
 ## `app/api/improve/errors.ts`, `models/`, `agent-tools.ts`, `agent-prompts.ts`, `agent-finish.ts`, `agent-run.ts`
 Error taxonomy (matchers, payloads, `MaxIterationsError(reason, detail)`);
-per-model resolvers (`gemini/qwen/spark.ts` + allowlist `index.ts`);
+per-model resolvers (`gemini/qwen/atria.ts` + allowlist `index.ts`);
 tool factory (3 tools, explicit state); prompt builders; finish transaction
 factory + `diffPaths`; retried tool loop + forwarding. Streams
 `thinking/file_patch/done/error`; finish saves messages + fileData
