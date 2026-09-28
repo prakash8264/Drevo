@@ -81,7 +81,12 @@ export async function POST(request: NextRequest) {
   // Server loads everything. The browser only sends workspaceId + push config.
   const user = await db.user.findUnique({
     where: { clerkId },
-    select: { id: true, githubAccessToken: true, githubUsername: true },
+    select: {
+      id: true,
+      githubAccessToken: true,
+      githubUsername: true,
+      memberships: { select: { organizationId: true } },
+    },
   });
   if (!user) return NextResponse.json({ message: "User not found." }, { status: 404 });
   if (!user.githubAccessToken) {
@@ -92,10 +97,18 @@ export async function POST(request: NextRequest) {
   }
 
   const workspace = await db.workspace.findUnique({
-    where: { id: workspaceId, userId: user.id },
-    select: { id: true, title: true, fileData: true, githubPushedFiles: true },
+    where: { id: workspaceId },
+    select: { id: true, title: true, fileData: true, githubPushedFiles: true, organizationId: true },
   });
   if (!workspace) return NextResponse.json({ message: "Workspace not found." }, { status: 404 });
+  // Org boundary: workspace must belong to an org the caller belongs to.
+  // Token stays per-user: MEMBER pushes with their own GitHub account.
+  if (
+    !workspace.organizationId ||
+    !user.memberships.some((m) => m.organizationId === workspace.organizationId)
+  ) {
+    return NextResponse.json({ message: "Workspace not found." }, { status: 404 });
+  }
 
   const fileData = parseFileData(workspace.fileData);
   if (!fileData || Object.keys(fileData.files ?? {}).length === 0) {

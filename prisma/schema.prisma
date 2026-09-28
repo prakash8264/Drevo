@@ -18,24 +18,71 @@ model User {
   name      String
   email     String   @unique
   imageUrl  String   @default("")
-  credits   Int      @default(10) // starts at free tier allocation
-  plan      String   @default("free")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Persistent active-organization reference (multi-org support).
+  // Validated against OrganizationMember on every use.
+  // Optional FK so deleting/switching orgs never deletes the user.
+  activeOrganizationId String?
+  activeOrganization   Organization? @relation("ActiveOrganization", fields: [activeOrganizationId], references: [id], onDelete: SetNull)
 
   githubAccessToken String? // encrypted GitHub OAuth token, never sent to client
   githubUsername    String?
   githubUserId      String?
   githubConnectedAt DateTime?
 
+  createdWorkspaces Workspace[] @relation("WorkspaceCreatedBy")
+  memberships OrganizationMember[]
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String?  @unique
+  // Clerk Organization id (B-variant: Clerk owns identity/membership/billing,
+  // Prisma mirrors + owns app data). Null until backfilled.
+  clerkOrgId String? @unique
+  plan      String   @default("free") // free | starter | pro — synced from Clerk org subscription via webhook
+  credits   Int      @default(10) // shared balance (replaces User.credits)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members   OrganizationMember[]
   workspaces Workspace[]
+  activeForUsers User[] @relation("ActiveOrganization")
+
+  @@index([plan])
+}
+
+model OrganizationMember {
+  id             String           @id @default(cuid())
+  organizationId String
+  userId         String
+  role           OrganizationRole @default(MEMBER)
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@index([organizationId])
+}
+
+enum OrganizationRole {
+  OWNER
+  ADMIN
+  MEMBER
 }
 
 model Workspace {
   id        String   @id @default(cuid())
   title     String?
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdById    String
+  createdBy      User         @relation("WorkspaceCreatedBy", fields: [createdById], references: [id])
   messages  Json     @default("[]")
   fileData  Json?
   createdAt DateTime @default(now())
@@ -48,7 +95,8 @@ model Workspace {
   lastPushedAt       DateTime?
   githubPushedFiles  Json? // repo-relative paths from the last successful push (for deletions)
 
-  @@index([userId])
+  @@index([organizationId])
+  @@index([createdById])
 }
 
 model WorkspaceVersion {

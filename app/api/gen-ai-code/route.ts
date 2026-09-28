@@ -228,15 +228,67 @@ export async function POST(request: NextRequest) {
   }
 
   const user = await db.user.findUnique({
-    where: { id: userId, clerkId },
-    select: { id: true, credits: true },
+    where: { clerkId },
+    select: {
+      id: true,
+      activeOrganizationId: true,
+      memberships: {
+        select: {
+          role: true,
+          organization: {
+            select: { id: true, credits: true },
+          },
+        },
+      },
+    },
   });
 
-  if (!user)
+  if (!user || user.memberships.length === 0)
     return Response.json({ message: "User not found" }, { status: 404 });
-  if (user.credits < CREDIT_COST_PER_GENERATION) {
+
+  // Resolve org: update branch → workspace's org + membership check;
+  // create branch → active org + OWNER/ADMIN required.
+  let orgId: string;
+  let orgRole: string | null = null;
+  if (workspaceId) {
+    const ws = await db.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { id: true, organizationId: true },
+    });
+    if (!ws?.organizationId)
+      return Response.json({ message: "Workspace not found" }, { status: 404 });
+    const m = user.memberships.find(
+      (x) => x.organization.id === ws.organizationId
+    );
+    if (!m)
+      return Response.json({ message: "Workspace not found" }, { status: 404 });
+    orgId = ws.organizationId;
+    orgRole = m.role;
+  } else {
+    const active =
+      user.memberships.find(
+        (x) => x.organization.id === user.activeOrganizationId
+      ) ?? user.memberships[0];
+    if (active.role !== "OWNER" && active.role !== "ADMIN") {
+      return Response.json(
+        { message: "Only admins can create projects.", code: "FORBIDDEN" },
+        { status: 403 }
+      );
+    }
+    orgId = active.organization.id;
+    orgRole = active.role;
+  }
+
+  const org = await db.organization.findUnique({
+    where: { id: orgId },
+    select: { id: true, credits: true },
+  });
+  if (!org)
+    return Response.json({ message: "Organization not found" }, { status: 404 });
+  if (org.credits < CREDIT_COST_PER_GENERATION) {
     return Response.json({ message: "Insufficient credits" }, { status: 402 });
   }
+  const internalUserId = user.id;
 
   const encoder = new TextEncoder();
 
@@ -438,7 +490,9 @@ export async function POST(request: NextRequest) {
           title: aiTitle,
         };
 
-        // ── Upsert workspace + deduct credit (single transaction) ──────────────
+        // ── Upsert workspace + deduct ORG credit (single guarded transaction) ──
+        // updateMany with credits>=cost makes concurrent spends atomic:
+        // only one of two parallel runs on a 1-credit balance commits.
 
         safeEnqueue(sseEvent("status", { message: "Saving…" }));
 
@@ -450,44 +504,65 @@ export async function POST(request: NextRequest) {
 
         // Snapshot the pre-run files so the edit stays restorable.
         // body fileData is the state before this run (null on first prompt).
-        const [workspace] = await db.$transaction([
-          workspaceId
-            ? db.workspace.update({
-                where: { id: workspaceId, userId },
+        let workspace: { id: string };
+        try {
+          workspace = await db.$transaction(async (tx) => {
+            let ws: { id: string };
+            if (workspaceId) {
+              ws = await tx.workspace.update({
+                where: { id: workspaceId },
                 data: {
                   messages: updatedMessages as never,
                   fileData: newFileData as never,
                 },
-              })
-            : db.workspace.create({
+              });
+            } else {
+              ws = await tx.workspace.create({
                 data: {
-                  userId,
+                  organizationId: orgId,
+                  createdById: internalUserId,
                   title: aiTitle ?? lastUserMessage.content.slice(0, 80),
                   messages: updatedMessages as never,
                   fileData: newFileData as never,
                 },
-              }),
-          ...(workspaceId && fileData
-            ? [
-                db.workspaceVersion.create({
-                  data: {
-                    workspaceId,
-                    fileData: fileData as never,
-                    summary: assistantMessage.slice(0, 120),
-                  },
-                }),
-              ]
-            : []),
-          db.user.update({
-            where: { id: userId },
-            data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
-          }),
-        ]);
+              });
+            }
+            if (workspaceId && fileData) {
+              await tx.workspaceVersion.create({
+                data: {
+                  workspaceId,
+                  fileData: fileData as never,
+                  summary: assistantMessage.slice(0, 120),
+                },
+              });
+            }
+            const creditRes = await tx.organization.updateMany({
+              where: {
+                id: orgId,
+                credits: { gte: CREDIT_COST_PER_GENERATION },
+              },
+              data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
+            });
+            if (creditRes.count === 0) throw new Error("INSUFFICIENT_CREDITS");
+            return ws;
+          });
+        } catch (txErr) {
+          if (
+            txErr instanceof Error &&
+            txErr.message === "INSUFFICIENT_CREDITS"
+          ) {
+            safeEnqueue(
+              sseEvent("error", { message: "Insufficient credits" })
+            );
+            return;
+          }
+          throw txErr;
+        }
 
         if (workspaceId) await pruneVersions(workspaceId);
 
-        const updatedUser = await db.user.findUnique({
-          where: { id: userId },
+        const updatedOrg = await db.organization.findUnique({
+          where: { id: orgId },
           select: { credits: true },
         });
 
@@ -499,7 +574,7 @@ export async function POST(request: NextRequest) {
             assistantMessage,
             fileData: newFileData,
             creditsRemaining:
-              updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
+              updatedOrg?.credits ?? org.credits - CREDIT_COST_PER_GENERATION,
           })
         );
       } catch (err) {

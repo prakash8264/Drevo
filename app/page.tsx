@@ -476,6 +476,7 @@ export default function LandingPage() {
                     <CheckoutButton
                       planId={plan.planId}
                       planPeriod="month"
+                      for="organization"
                       checkoutProps={{
                         appearance: {
                           elements: {

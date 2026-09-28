@@ -4,24 +4,21 @@ import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/prisma";
+import { getActiveOrganization } from "@/lib/org";
 import type { ProjectSummary } from "@/types/project";
 
 export type { ProjectSummary } from "@/types/project";
 
-// ─── Get all workspaces for the current user ──────────────────────────────────
+// ─── Get all workspaces for the active organization ──────────────────────────
 
 export async function getUserProjects(): Promise<ProjectSummary[]> {
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
-  const user = await db.user.findUnique({
-    where: { clerkId },
-    select: { id: true },
-  });
-  if (!user) redirect("/");
+  const active = await getActiveOrganization();
 
   const workspaces = await db.workspace.findMany({
-    where: { userId: user.id },
+    where: { organizationId: active.organization.id },
     select: {
       id: true,
       title: true,
@@ -44,7 +41,7 @@ export async function getUserProjects(): Promise<ProjectSummary[]> {
     return {
       id: w.id,
       title: w.title,
-      firstPrompt: firstUserMsg?.content?.slice(0, 120) ?? null, // ← new
+      firstPrompt: firstUserMsg?.content?.slice(0, 120) ?? null,
       createdAt: w.createdAt,
       updatedAt: w.updatedAt,
       messageCount: Array.isArray(w.messages) ? w.messages.length : 0,
@@ -52,20 +49,19 @@ export async function getUserProjects(): Promise<ProjectSummary[]> {
   });
 }
 
-// ─── Delete a workspace ───────────────────────────────────────────────────────
+// ─── Delete a workspace (OWNER/ADMIN only, org-scoped) ───────────────────────
 
 export async function deleteProject(workspaceId: string): Promise<void> {
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
-  const user = await db.user.findUnique({
-    where: { clerkId },
-    select: { id: true },
-  });
-  if (!user) redirect("/");
+  const active = await getActiveOrganization();
+  if (active.role !== "OWNER" && active.role !== "ADMIN") {
+    throw Object.assign(new Error("Forbidden"), { status: 403 });
+  }
 
   await db.workspace.deleteMany({
-    where: { id: workspaceId, userId: user.id },
+    where: { id: workspaceId, organizationId: active.organization.id },
   });
 
   revalidatePath("/projects");

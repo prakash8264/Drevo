@@ -14,7 +14,7 @@ export default async function WorkspacePage({
 
   let workspace = null;
   if (id) {
-    workspace = await getWorkspaceById(id, user.id);
+    workspace = await getWorkspaceById(id);
   }
 
   return (
@@ -23,6 +23,8 @@ export default async function WorkspacePage({
       workspace={workspace}
       userCredits={user.credits}
       userId={user.id}
+      orgId={user.orgId}
+      userRole={user.role}
       githubConnected={user.githubConnected}
       githubUsername={user.githubUsername}
     />

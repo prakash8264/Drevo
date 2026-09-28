@@ -8,9 +8,10 @@ import { DeleteProjectModal } from "./DeleteProjectModal";
 
 interface ProjectCardProps {
   projects: ProjectSummary[];
+  canDelete?: boolean;
 }
 
-export function ProjectCard({ projects }: ProjectCardProps) {
+export function ProjectCard({ projects, canDelete = true }: ProjectCardProps) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {projects.map((project) => {
@@ -36,11 +37,13 @@ export function ProjectCard({ projects }: ProjectCardProps) {
               <p className="line-clamp-1 text-sm font-medium leading-snug text-white/80">
                 {title}
               </p>
-              <DeleteProjectModal project={project}>
-                <span className="relative z-10 text-white/20 hover:text-red-400">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </span>
-              </DeleteProjectModal>
+              {canDelete && (
+                <DeleteProjectModal project={project}>
+                  <span className="relative z-10 text-white/20 hover:text-red-400">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </span>
+                </DeleteProjectModal>
+              )}
             </div>
 
             {/* First prompt preview */}

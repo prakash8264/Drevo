@@ -81,17 +81,43 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // ── Auth + credit check (same 1 credit as generation, all plans) ──────────
+  // ── Auth + org credit check (same 1 credit as generation, all plans) ────
 
-  const user = await db.user.findUnique({
-    where: { id: userId, clerkId },
-    select: { id: true, credits: true, plan: true },
+  const dbUser = await db.user.findUnique({
+    where: { clerkId },
+    select: {
+      id: true,
+      memberships: {
+        select: { role: true, organization: { select: { id: true, credits: true } } },
+      },
+    },
   });
 
-  if (!user)
+  if (!dbUser || dbUser.memberships.length === 0)
     return Response.json({ message: "User not found" }, { status: 404 });
 
-  if (user.credits < CREDIT_COST_PER_GENERATION)
+  const wsOrg = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { organizationId: true },
+  });
+  if (!wsOrg?.organizationId)
+    return Response.json({ message: "Workspace not found" }, { status: 404 });
+  const membership = dbUser.memberships.find(
+    (m) => m.organization.id === wsOrg.organizationId
+  );
+  if (!membership)
+    return Response.json({ message: "Workspace not found" }, { status: 404 });
+
+  const orgId = wsOrg.organizationId;
+  const internalUserId = dbUser.id;
+
+  const orgCreditsRow = await db.organization.findUnique({
+    where: { id: orgId },
+    select: { credits: true },
+  });
+  const orgCredits = orgCreditsRow?.credits ?? 0;
+
+  if (orgCredits < CREDIT_COST_PER_GENERATION)
     return Response.json({ message: "Insufficient credits" }, { status: 402 });
 
   // ── Build the agent ────────────────────────────────────────────────────────
@@ -178,12 +204,12 @@ export async function POST(request: NextRequest) {
       // (partial save on maxIterations) can use it. Both deduct 1 credit.
       const finishRun = createFinishRun({
         workspaceId,
-        userId,
+        orgId,
         userRequest,
         imageUrl,
         messages,
         baseFileData: fileData,
-        userCredits: user.credits,
+        orgCredits,
         getState: () => ({
           files: patchedFiles,
           dependencies: patchedDependencies,
@@ -317,7 +343,7 @@ export async function POST(request: NextRequest) {
               fileData,
               summary: noOpSummary,
               partial: false,
-              creditsRemaining: user.credits,
+              creditsRemaining: orgCredits,
             })
           );
           return;

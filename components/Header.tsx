@@ -4,10 +4,38 @@ import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LogoMark } from "@/components/LogoMark";
 import { HeaderCredits } from "@/components/HeaderCredits";
+import { OrgSwitcher } from "@/components/OrgSwitcher";
+import { MembersDialog } from "@/components/MembersDialog";
 import { checkUser } from "@/lib/checkUser";
+import { db } from "@/lib/prisma";
 
 export default async function Header() {
   const user = await checkUser();
+
+  let orgCredits: number | null = null;
+  let orgName: string | null = null;
+  if (user) {
+    const full = await db.user.findUnique({
+      where: { id: user.id },
+      select: {
+        activeOrganizationId: true,
+        memberships: {
+          select: {
+            organization: {
+              select: { id: true, name: true, credits: true },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+    const pick =
+      full?.memberships.find(
+        (m) => m.organization.id === full.activeOrganizationId
+      ) ?? full?.memberships[0];
+    orgCredits = pick?.organization.credits ?? null;
+    orgName = pick?.organization.name ?? null;
+  }
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-16 border-b border-white/6 bg-white/7 backdrop-blur-md">
@@ -27,7 +55,9 @@ export default async function Header() {
               Projects
             </Link>
 
-            {user && <HeaderCredits initial={user.credits} />}
+            <OrgSwitcher currentName={orgName} />
+            <MembersDialog />
+            {orgCredits !== null && <HeaderCredits initial={orgCredits} />}
 
             <UserButton />
           </Show>

@@ -36,12 +36,12 @@ export function diffPaths(
 
 export interface FinishRunArgs {
   workspaceId: string;
-  userId: string;
+  orgId: string;
   userRequest: string;
   imageUrl?: string;
   messages?: Message[];
   baseFileData: FileData;
-  userCredits: number;
+  orgCredits: number;
   getState: () => {
     files: Record<string, { code: string }>;
     dependencies: Record<string, string>;
@@ -90,32 +90,43 @@ export function createFinishRun(args: FinishRunArgs) {
       { role: "assistant", content: summary },
     ];
 
-    await db.$transaction([
-      db.workspace.update({
-        where: { id: args.workspaceId, userId: args.userId },
-        data: {
-          messages: updatedMessages as never,
-          fileData: newFileData as never,
-        },
-      }),
-      // Snapshot the pre-run files so the edit stays restorable.
-      db.workspaceVersion.create({
-        data: {
-          workspaceId: args.workspaceId,
-          fileData: args.baseFileData as never,
-          summary: args.userRequest.slice(0, 120),
-        },
-      }),
-      db.user.update({
-        where: { id: args.userId },
-        data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
-      }),
-    ]);
+    try {
+      await db.$transaction(async (tx) => {
+        await tx.workspace.update({
+          where: { id: args.workspaceId },
+          data: {
+            messages: updatedMessages as never,
+            fileData: newFileData as never,
+          },
+        });
+        // Snapshot the pre-run files so the edit stays restorable.
+        await tx.workspaceVersion.create({
+          data: {
+            workspaceId: args.workspaceId,
+            fileData: args.baseFileData as never,
+            summary: args.userRequest.slice(0, 120),
+          },
+        });
+        const creditRes = await tx.organization.updateMany({
+          where: {
+            id: args.orgId,
+            credits: { gte: CREDIT_COST_PER_GENERATION },
+          },
+          data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
+        });
+        if (creditRes.count === 0) throw new Error("INSUFFICIENT_CREDITS");
+      });
+    } catch (txErr) {
+      if (txErr instanceof Error && txErr.message === "INSUFFICIENT_CREDITS") {
+        throw Object.assign(new Error("Insufficient credits"), { status: 402 });
+      }
+      throw txErr;
+    }
 
     await pruneVersions(args.workspaceId);
 
-    const updatedUser = await db.user.findUnique({
-      where: { id: args.userId },
+    const updatedOrg = await db.organization.findUnique({
+      where: { id: args.orgId },
       select: { credits: true },
     });
 
@@ -124,7 +135,7 @@ export function createFinishRun(args: FinishRunArgs) {
       summary,
       partial,
       creditsRemaining:
-        updatedUser?.credits ?? args.userCredits - CREDIT_COST_PER_GENERATION,
+        updatedOrg?.credits ?? args.orgCredits - CREDIT_COST_PER_GENERATION,
     });
   };
 }

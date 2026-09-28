@@ -4,12 +4,13 @@ import { Zap } from "lucide-react";
 import { ProjectCard } from "@/components/ProjectCard";
 import Link from "next/link";
 import { getUserProjects } from "@/actions/projects";
+import { getActiveOrganization } from "@/lib/org";
 import { BrandTitle } from "@/components/reusables";
 import { Button } from "@/components/ui/button";
 
 // ─── Empty state ──────────────────────────────────────────────────────────────
 
-function EmptyState() {
+function EmptyState({ canCreate }: { canCreate: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center py-32 text-center">
       <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-white/8 bg-white/4">
@@ -17,14 +18,18 @@ function EmptyState() {
       </div>
       <p className="mb-1 text-sm font-medium text-white/40">No projects yet</p>
       <p className="mb-6 text-xs text-white/20">
-        Head to the homepage and describe what you want to build.
+        {canCreate
+          ? "Head to the homepage and describe what you want to build."
+          : "An admin in your organization can create the first project."}
       </p>
-      <Link
-        href="/"
-        className="inline-flex h-8 items-center gap-1.5 rounded-full bg-white px-4 text-[13px] font-semibold text-black transition-opacity hover:opacity-90"
-      >
-        Start building
-      </Link>
+      {canCreate && (
+        <Link
+          href="/"
+          className="inline-flex h-8 items-center gap-1.5 rounded-full bg-white px-4 text-[13px] font-semibold text-black transition-opacity hover:opacity-90"
+        >
+          Start building
+        </Link>
+      )}
     </div>
   );
 }
@@ -35,7 +40,9 @@ export default async function ProjectsPage() {
   const { userId } = await auth();
   if (!userId) redirect("/");
 
+  const active = await getActiveOrganization();
   const projects = await getUserProjects();
+  const canCreate = active.role === "OWNER" || active.role === "ADMIN";
 
   return (
     <main className="min-h-screen bg-[#0a0a0a] px-4 py-10">
@@ -45,22 +52,25 @@ export default async function ProjectsPage() {
           <div>
             <BrandTitle className="text-6xl">Projects</BrandTitle>
             <p className="mt-3 text-sm text-white/30">
-              All your AI-generated apps in one place.
+              {active.organization.name} · {projects.length} project
+              {projects.length !== 1 ? "s" : ""} · shared workspace
             </p>
           </div>
-          <Link href="/">
-            <Button className={"cursor-pointer"}>
-              <Zap className="h-3 w-3 fill-black" />
-              New project
-            </Button>
-          </Link>
+          {canCreate && (
+            <Link href="/">
+              <Button className={"cursor-pointer"}>
+                <Zap className="h-3 w-3 fill-black" />
+                New project
+              </Button>
+            </Link>
+          )}
         </div>
 
         {/* Grid */}
         {projects.length === 0 ? (
-          <EmptyState />
+          <EmptyState canCreate={canCreate} />
         ) : (
-          <ProjectCard projects={projects} />
+          <ProjectCard projects={projects} canDelete={canCreate} />
         )}
       </div>
     </main>
