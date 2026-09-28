@@ -19,7 +19,7 @@ import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
 import { PricingModal } from "@/components/PricingModal";
-import type { Message, StatusStep } from "@/types/workspace";
+import type { Message, StatusStep, EditModelId } from "@/types/workspace";
 import { createClient } from "@supabase/supabase-js";
 import { BrandTitle } from "./reusables";
 import { LogoMark } from "@/components/LogoMark";
@@ -36,7 +36,7 @@ interface ChatPanelProps {
   statusLog: StatusStep[];
   credits: number;
   initialPrompt: string | null;
-  onGenerate: (prompt: string, imageUrl?: string) => Promise<void>;
+  onGenerate: (prompt: string, imageUrl?: string, model?: EditModelId) => Promise<void>;
   onRegenerate: () => void;
   onEditMessage: (index: number, content: string) => void;
   onStop: () => void;
@@ -44,6 +44,15 @@ interface ChatPanelProps {
   workspaceId: string | null;
   appTitle: string | null;
   width?: number;
+  // Edit-model toggle (follow-up prompts only — first generation is Gemini).
+  editModel: EditModelId;
+  onEditModelChange: (model: EditModelId) => void;
+  // Qwen free-pool budget (display-only, refreshed by the parent).
+  qwenBudget: {
+    configured: boolean;
+    remaining: number | null;
+    limit: number | null;
+  } | null;
 }
 
 export function ChatPanel({
@@ -61,6 +70,9 @@ export function ChatPanel({
   workspaceId,
   appTitle,
   width,
+  editModel,
+  onEditModelChange,
+  qwenBudget,
 }: ChatPanelProps) {
   const { user } = useUser();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -125,7 +137,9 @@ export function ChatPanel({
     if (!trimmed || isGenerating || isImproving || noCredits) return;
     setInput("");
     setPendingImageUrl(null);
-    await onGenerate(trimmed, pendingImageUrl ?? undefined);
+    // Toggle selection travels along; the router ignores it on the
+    // first-prompt generation path (always Gemini) and uses it on edits.
+    await onGenerate(trimmed, pendingImageUrl ?? undefined, editModel);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -476,6 +490,61 @@ export function ChatPanel({
               className="hidden"
               onChange={handleFileChange}
             />
+
+            {/* Edit-model toggle — follow-up prompts only. Shown once the
+                workspace exists (first generation is always Gemini). */}
+            {workspaceId && (
+              <div className="flex flex-col items-center gap-1">
+                <div
+                  className="flex items-center rounded-md border border-white/10 p-0.5"
+                  title="Model used for follow-up edits"
+                >
+                  {(["gemini", "qwen", "atria"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => onEditModelChange(m)}
+                      disabled={isGenerating || isImproving}
+                      title={
+                        m === "gemini"
+                          ? "Gemini 3.5 Flash (default)"
+                          : m === "qwen"
+                            ? "Qwen 3.8 27B via OpenRouter (free)"
+                            : "Atria Dawn Preview via ATRIA ASI"
+                      }
+                      className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
+                        editModel === m
+                          ? "bg-white/10 text-white/80"
+                          : "text-white/30 hover:text-white/60"
+                      }`}
+                    >
+                      {m === "gemini" ? "Gemini" : m === "qwen" ? "Qwen" : "Atria"}
+                    </button>
+                  ))}
+                </div>
+                {editModel === "atria" && (
+                  <span
+                    className="max-w-44 text-center text-[10px] leading-snug text-white/25"
+                    title="Atria-Dawn-Preview accepts text only: attached screenshots travel as URL text the model cannot view"
+                  >
+                    Text-only model — screenshots are sent as links it can&apos;t view.
+                  </span>
+                )}
+                {editModel === "qwen" && (
+                  <span className="text-[10px] text-white/25">
+                    {qwenBudget === null
+                      ? "Checking free quota…"
+                      : !qwenBudget.configured
+                        ? "Add an OpenRouter key to enable Qwen."
+                        : qwenBudget.remaining === null
+                          ? "Free quota unknown."
+                          : qwenBudget.remaining === 0
+                            ? "Qwen free: 0 left today — resets UTC midnight, Gemini unaffected."
+                            : `Qwen free: ${qwenBudget.remaining} of ${qwenBudget.limit ?? "?"} left today.`}
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* Stop button — shown while generating or improving */}
             {isGenerating || isImproving ? (

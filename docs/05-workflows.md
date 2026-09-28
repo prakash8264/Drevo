@@ -19,6 +19,8 @@ flowchart TD
 
 How preview works: `CodePanel` builds `files = fileData.files ?? PLACEHOLDER_FILES`, `dependencies = BASE + AI`, `key = sorted paths`. `SandpackProvider template=react` compiles in browser. Content updates go via `sandpack.updateFile(path,code)` diff — no remount unless path set changes. Tailwind via CDN external resource, recompile delayed 500ms.
 
+Google 503 sheds (at-call and mid-stream) are absorbed by an in-stream retry envelope (max 3 attempts, backoff + jitter, `status "Model busy — retrying…"`, attempt logging with at-call/mid-stream cause), then an optional `GEMINI_FALLBACK_MODEL`, before the free `MODEL_OVERLOADED` error. Same envelope on the improve path (with per-attempt accumulation reset).
+
 How code view works: same provider, `SandpackFileExplorer` + `SandpackCodeEditor readOnly` tabs. `keepMounted` both tabs.
 
 ## Flow B — Iterate via chat (first prompt only, no files yet)
@@ -29,7 +31,7 @@ Same as A: `buildContents` includes history (trimmed `first+last8`). No `fileDat
 
 ```mermaid
 flowchart TD
-  B[2nd+ chat prompt, screenshot, or Fix with AI] --> A[POST /api/improve: Cline Agent maxIterations 12]
+  B[2nd+ chat prompt, screenshot, or Fix with AI] --> A[POST /api/improve: AI SDK streamText, 12-step budget]
   A --> T1[update_file tool -> SSE file_patch]
   A --> T3[add_dependency tool -> npm validated]
   A --> T2[done_improving tool -> completesRun]
@@ -37,7 +39,7 @@ flowchart TD
   DB --> UI[Apply fileData at once + summary replaces thinking]
 ```
 
-Routing lives in `WorkspaceClient`: no workspace/files yet -> Flow A/B (one-shot JSON); otherwise -> this flow. No separate Improve button. Patches apply at `done` to avoid Sandpack remounts mid-stream. If the step budget runs out after files changed, completed updates are kept (partial `done`, 1 credit, "ask to continue"); if nothing changed, a free friendly error is sent. Refusals and no-op requests (`NO_OP:` summaries, no changed paths/deps) resolve to a free `done` with unchanged files — no deduction, no snapshot.
+Routing lives in `WorkspaceClient`: no workspace/files yet -> Flow A/B (one-shot JSON, always Gemini);   otherwise -> this flow with the toggle-selected edit model (`RunOpts.model`, default Gemini; regenerate/edit/fix reuse the toggle). No separate Improve button. Patches apply at `done` to avoid Sandpack remounts mid-stream. If the step budget runs out after files changed, completed updates are kept (partial `done`, 1 credit, "ask to continue"); if nothing changed, a free friendly error is sent. Refusals and no-op requests (`NO_OP:` summaries, no changed paths/deps) resolve to a free `done` with unchanged files — no deduction, no snapshot. The chat-panel Gemini/Qwen/Atria toggle (shown once the workspace exists; Atria carries a text-only note) feeds `onGenerate(prompt, imageUrl?, model)`; unconfigured models return a clean free 400.
 
 ## Flow D — Preview error -> Fix with AI
 
@@ -138,6 +140,6 @@ display-only. Server Header never re-renders client-side — the
 - `file_patch {path, code, reason}` (improve only).
 - `done {workspaceId?, fileData, creditsRemaining, assistantMessage?|summary?, partial?}`.
 - `done {…, unchanged: true}` (GitHub push only) — no commit needed.
-- `error {message, code?: QUOTA_EXCEEDED | MAX_ITERATIONS, retryAfter?}` — never deducts credits.
+- `error {message, code?: QUOTA_EXCEEDED | MODEL_OVERLOADED | MAX_ITERATIONS, retryAfter?}` — never deducts credits.
 - Push error codes: `GITHUB_NOT_CONNECTED | GITHUB_TOKEN_INVALID` (401),
   `REPO_CREATED_PUSH_FAILED` (500 + repoUrl), `BRANCH_DIVERGED` (409).

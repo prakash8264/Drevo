@@ -14,4 +14,4 @@ which file does what, and which function does what.
 7. [07-github-integration.md](./07-github-integration.md) — GitHub deep dive: OAuth setup, endpoint contracts, push algorithms, divergence safety, security.
 8. [08-ai-agent-deep-dive.md](./08-ai-agent-deep-dive.md) — AI deep dive: generator vs agent, tools lifecycle, prompts, SSE mapping, credit rules.
 
-> Generated from the live codebase (Next.js 16.3.4, React 19, Clerk, Gemini, Cline SDK, Sandpack, Prisma + Supabase, Octokit).
+> Generated from the live codebase (Next.js 16.3.4, React 19, Clerk, Gemini, AI SDK v7, Sandpack, Prisma + Supabase, Octokit).

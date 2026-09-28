@@ -52,6 +52,99 @@ Fix: local const deleted; `CodePanel` imports `BASE_DEPENDENCIES` from
 initializer, so SSR (`320px`) differs from client (e.g. `537px`). Cosmetic
 warning only; no action taken.
 
+## 15. Qwen 429 masked by `ReferenceError: Cannot access 'streamError' before initialization`
+Two stacked failures: OpenRouter throttled the free shared pool
+(`limit_source: upstream_provider_shared_pool` — transient, retry succeeded
+minutes later), and our catch crashed reading `streamError` declared *after*
+the throwing `streamText()` call (TDZ), killing the retry loop on attempt 1
+with a generic toast for a quota event. Fixes: hoist `streamError`/`sawChunks`
+above the `try`; `maxRetries: 0` so our envelope is the sole retry authority
+(SDK-internal retries silently tripled requests per attempt); deep
+`collectErrorText` matching across `errors[]`/`lastError`/cause. Pool limits
+remain (OpenRouter suggests BYOK provider keys to accumulate own limits).
+
+## 14. Qwen toggle answers "not configured" / odd provider errors
+Cause: `OPENROUTER_API_KEY` empty (toggle's Qwen path returns a clean free
+`QWEN_NOT_CONFIGURED` 400 by design), or OpenRouter-side shapes (402
+account-credit, `no endpoints`, gateway errors) mapped into the existing
+quota/overload paths. Fix: add an OpenRouter key (free models cost $0 but
+still require one); check the terminal `[improve:<label>]` attempt lines to
+see which provider failed and how.
+
+## 16. Spark slot replaced by Atria (was: Responses-only hazards)
+Spark (`muse-spark-1.3-contributor-free`) never shipped — its free tier is
+caller-gated to inside OpenCode (403 `FreeTierError` on any outside call;
+see #17 for the identical MiMo probe). Lessons kept for the record:
+- Wrong Zen endpoint looks like an outage: `/chat/completions` for Muse
+  models answers generic 500 — the provider must target `…/zen/v1/responses`
+  via `.responses()`, with base `…/zen/v1` (the provider appends the path;
+  a full endpoint URL doubles it).
+- Reported text→tool chain stalls on free Muse models would have made the
+  multi-file batched edit the go/no-go battery item.
+- The parked `spark.ts` was replaced by `models/atria.ts` (standard Chat
+  Completions — none of the above applies). Git history preserves the
+  Spark implementation.
+
+## 18. Atria-Dawn-Preview integration (replaces the Spark slot)
+Live probe passed first (minimal chat call, user key, HTTP 200 "OK") —
+only then was anything built. Notes:
+- Standard Chat Completions (`@ai-sdk/openai-compatible`,
+  `https://api.atria-asi.ai/v1`, exact model id `Atria-Dawn-Preview`);
+  provider requires `name` in settings (tsc gate caught the omission).
+- Text-only model: screenshots travel as URL text (compatible — no image
+  parts are ever sent), but the model cannot view images (disclosed in UI).
+- Per-minute account RPM caps publish exact `Retry-After`/`x-rpm-*`
+  headers — honored in quota payloads (body countdown → hint → header).
+- Toggle: Gemini/Qwen/Atria; no budget microcopy for Atria (per-minute
+  headers only, surfaced via toasts).
+
+## 17. MiMo-V2.6-Flash Free is caller-gated like Spark — parked
+Live probe (minimal chat-completions call, valid Zen key, 2026-09-24):
+`403 FreeTierError "OpenCode's free tier can only be used from within
+OpenCode"` — identical gate to `muse-spark-1.3-contributor-free`, despite
+MiMo using the standard chat endpoint. So the gate is per free-model
+policy, not endpoint-specific, and no request shape avoids it. Per plan:
+no code was added for MiMo (swap stopped at the probe); the Spark toggle
+slot stays as-is pending a separate decision. Legitimate alternatives
+unchanged: paid Zen models (no caller gate), Meta-direct Contributor tier,
+or more OpenRouter `:free` models through the existing Qwen plumbing.
+
+## 13. Partial note blames "steps" when quota/overload killed the run
+Cause: mid-stream `error` parts were ignored, so any death without
+`done_improving` classified as budget exhaustion — right path (kept work, 1
+credit) but wrong story. Also note the free-tier daily cap surfacing here:
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier` = 20/day, and every
+attempt (including overload retries) burns units; `RetryInfo` countdowns can
+mislead on daily caps (UTC-midnight reset).
+
+## 12. `AI_UnsupportedModelVersionError: Unsupported model version v4` on every improve call
+Fix: capture `error` parts into `streamError`; `MaxIterationsError(reason,
+detail?)` carries `steps|quota|overload`; partial notes and free errors name
+the true cause (quota countdown parsed from detail when present).
+Cause: dependency drift — top-level `ai` had floated to 6.0.280 while
+`@ai-sdk/google` floated to 4.0.67 (v4-spec models), plus orphaned
+`node_modules/@cline` remnants (incl. a nested `ai@7`) left behind by an
+incomplete `npm uninstall`. A v4-spec model object handed to a v2-only core
+throws before any network call, so all 2nd+ prompts failed deterministically.
+Fix: fully remove `@cline/*` (verify `node_modules/@cline` gone from disk
+and lockfile), pin exact `ai 7.0.109` + `@ai-sdk/google 3.0.125` in
+`package.json` (JSON allows no comments — the pairing rule lives here), and
+re-verify with `tsc` (the model-assignability error is the gate) + `build`.
+Prevention: never float these two majors independently; check
+`node -e` versions after any install touching AI deps.
+
+## 11. `{"error":"Forbidden"}` on `localhost:3000`, nothing else renders
+Cause: `proxy.ts` ran Arcjet (`shield` + `detectBot`, LIVE) on every request.
+Arcjet has no reputation data for the loopback client IP (`127.0.0.1`), so it
+denies localhost requests while the same request with a public IP passes
+(verified: browser-UA curl → 403, identical request + `X-Forwarded-For:
+8.8.8.8` → 200). Pure local-dev issue — production behind Vercel always sees
+real public IPs.
+Fix: `proxy.ts` skips the Arcjet check when the request host is loopback
+(`localhost`, `127.0.0.1`, `[::1]`) — Clerk auth still applies, and every
+non-localhost host always goes through Arcjet. Denials now also log
+`[proxy] Arcjet denied request:` with reason for future diagnosis.
+
 ## 10. GitHub OAuth setup pitfalls
 - `redirect_uri mismatch` on authorize → `GITHUB_REDIRECT_URI` must equal
   the app's callback URL character-for-character (scheme included).
