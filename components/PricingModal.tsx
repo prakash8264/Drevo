@@ -19,11 +19,18 @@ import { PRICING_PLANS } from "@/lib/constants";
 interface PricingModalProps {
   children: React.ReactNode;
   reason?: "credits" | "upgrade";
+  // Organization plan is the source of truth (free|starter|pro), synced from
+  // the Clerk org subscription via /api/webhooks/clerk. Checkout below bills
+  // the ACTIVE Clerk org (for="organization") — the switcher must keep the
+  // Clerk active org and Prisma activeOrganizationId in sync. The has()
+  // fallback is display-only for orgs not yet webhook-synced.
+  orgPlan?: string | null;
 }
 
 export function PricingModal({
   children,
   reason = "upgrade",
+  orgPlan = null,
 }: PricingModalProps) {
   const { isSignedIn, has } = useAuth();
 
@@ -40,13 +47,13 @@ export function PricingModal({
     pro: 2,
   };
 
-  const activePlanKey = isSignedIn
+  const activePlanKey = orgPlan ?? (isSignedIn
     ? has?.({ plan: "pro" })
       ? "pro"
       : has?.({ plan: "starter" })
       ? "starter"
       : "free"
-    : null;
+    : null);
 
   return (
     <Dialog>
@@ -179,6 +186,7 @@ export function PricingModal({
                     <CheckoutButton
                       planId={plan.planId}
                       planPeriod="month"
+                      for="organization"
                       checkoutProps={{
                         appearance: {
                           elements: {

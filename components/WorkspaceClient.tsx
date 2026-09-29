@@ -37,6 +37,8 @@ interface WorkspaceClientProps {
   workspace: WorkspaceData | null;
   userCredits: number;
   userId: string;
+  orgId: string;
+  userRole: "OWNER" | "ADMIN" | "MEMBER";
   githubConnected: boolean;
   githubUsername: string | null;
 }
@@ -61,6 +63,8 @@ export function WorkspaceClient({
   workspace,
   userCredits,
   userId,
+  orgId,
+  userRole,
   githubConnected: initialGithubConnected,
   githubUsername: initialGithubUsername,
 }: WorkspaceClientProps) {
@@ -282,6 +286,11 @@ export function WorkspaceClient({
     async (prompt: string, imageUrl?: string, opts?: RunOpts) => {
       if (isGenerating) return;
       if (credits < MIN_CREDITS_TO_GENERATE) return;
+      // MEMBERs cannot create new projects (server enforces 403 too).
+      if (!workspaceIdRef.current && userRole === "MEMBER") {
+        toast.error("Only admins can create projects.");
+        return;
+      }
 
       const userMessage: Message = {
         role: "user",
@@ -324,6 +333,18 @@ export function WorkspaceClient({
         });
 
         if (res.status === 402) {
+          setMessages((prev) => prev.slice(0, -1));
+          if (charged) {
+            refundOptimistic();
+            charged = false;
+          }
+          return;
+        }
+        if (res.status === 403) {
+          const data = (await res.json().catch(() => null)) as {
+            message?: string;
+          } | null;
+          toast.error(data?.message ?? "Only admins can create projects.");
           setMessages((prev) => prev.slice(0, -1));
           if (charged) {
             refundOptimistic();
@@ -460,6 +481,7 @@ export function WorkspaceClient({
       credits,
       isGenerating,
       userId,
+      userRole,
       refreshVersions,
       decrementOptimistic,
       refundOptimistic,
@@ -811,7 +833,7 @@ export function WorkspaceClient({
             onRegenerate={handleRegenerate}
             onEditMessage={handleEditMessage}
             onStop={handleStop}
-            userId={userId}
+            orgId={orgId}
             workspaceId={workspaceId}
             appTitle={fileData?.title ?? workspace?.title ?? null}
             width={chatWidth}

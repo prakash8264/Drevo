@@ -40,7 +40,7 @@ interface ChatPanelProps {
   onRegenerate: () => void;
   onEditMessage: (index: number, content: string) => void;
   onStop: () => void;
-  userId: string;
+  orgId: string;
   workspaceId: string | null;
   appTitle: string | null;
   width?: number;
@@ -66,7 +66,7 @@ export function ChatPanel({
   onRegenerate,
   onEditMessage,
   onStop,
-  userId,
+  orgId,
   workspaceId,
   appTitle,
   width,
@@ -155,7 +155,7 @@ export function ChatPanel({
     setIsUploading(true);
     try {
       const ext = file.name.split(".").pop();
-      const path = `${userId}/${workspaceId ?? "new"}/${Date.now()}.${ext}`;
+      const path = `${orgId}/${workspaceId ?? "new"}/${Date.now()}.${ext}`;
       const { error } = await supabase.storage
         .from("workspace-images")
         .upload(path, file, { upsert: true });

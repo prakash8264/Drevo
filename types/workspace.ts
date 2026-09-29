@@ -36,8 +36,11 @@ export interface WorkspaceData {
 
 export interface WorkspaceUser {
   id: string;
-  credits: number;
-  plan: string;
+  orgId: string;
+  orgName: string;
+  credits: number; // organization shared balance (display only; DB truth is Organization.credits)
+  plan: string; // organization plan
+  role: "OWNER" | "ADMIN" | "MEMBER";
   githubConnected: boolean;
   githubUsername: string | null;
 }

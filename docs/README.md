@@ -13,5 +13,7 @@ which file does what, and which function does what.
 6. [06-troubleshooting.md](./06-troubleshooting.md) — Errors already seen in this project and how they were fixed.
 7. [07-github-integration.md](./07-github-integration.md) — GitHub deep dive: OAuth setup, endpoint contracts, push algorithms, divergence safety, security.
 8. [08-ai-agent-deep-dive.md](./08-ai-agent-deep-dive.md) — AI deep dive: generator vs agent, tools lifecycle, prompts, SSE mapping, credit rules.
+9. [09-multi-tenancy.md](./09-multi-tenancy.md) — Organizations: models, roles, shared credits, member APIs, migrations.
 
 > Generated from the live codebase (Next.js 16.3.4, React 19, Clerk, Gemini, AI SDK v7, Sandpack, Prisma + Supabase, Octokit).
+> Org model: `Organization` owns workspaces/credits/plan; `User` is identity only (see 09). Docs 01–08 predate the migration where they say `user.credits` / `userId` workspaces.

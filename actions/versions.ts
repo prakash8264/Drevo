@@ -34,21 +34,18 @@ function toSummary(v: {
   };
 }
 
-async function getInternalUserId(clerkId: string): Promise<string> {
+async function getUserOrgIds(clerkId: string): Promise<string[]> {
   const user = await db.user.findUnique({
     where: { clerkId },
-    select: { id: true },
+    select: { memberships: { select: { organizationId: true } } },
   });
-  if (!user) redirect("/");
-  return user.id;
+  if (!user || user.memberships.length === 0) redirect("/");
+  return user.memberships.map((m) => m.organizationId);
 }
 
-async function assertOwnership(
-  workspaceId: string,
-  userId: string
-): Promise<void> {
-  const workspace = await db.workspace.findUnique({
-    where: { id: workspaceId, userId },
+async function assertOrgAccess(workspaceId: string, orgIds: string[]) {
+  const workspace = await db.workspace.findFirst({
+    where: { id: workspaceId, organizationId: { in: orgIds } },
     select: { id: true },
   });
   if (!workspace) redirect("/");
@@ -62,8 +59,8 @@ export async function getVersions(
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
-  const userId = await getInternalUserId(clerkId);
-  await assertOwnership(workspaceId, userId);
+  const orgIds = await getUserOrgIds(clerkId);
+  await assertOrgAccess(workspaceId, orgIds);
 
   const versions = await db.workspaceVersion.findMany({
     where: { workspaceId },
@@ -86,12 +83,12 @@ export async function restoreVersion(
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
-  const userId = await getInternalUserId(clerkId);
-  await assertOwnership(workspaceId, userId);
+  const orgIds = await getUserOrgIds(clerkId);
+  await assertOrgAccess(workspaceId, orgIds);
 
   const [workspace, version] = await Promise.all([
-    db.workspace.findUnique({
-      where: { id: workspaceId, userId },
+    db.workspace.findFirst({
+      where: { id: workspaceId, organizationId: { in: orgIds } },
       select: { fileData: true },
     }),
     db.workspaceVersion.findUnique({
@@ -116,7 +113,7 @@ export async function restoreVersion(
         ]
       : []),
     db.workspace.update({
-      where: { id: workspaceId, userId },
+      where: { id: workspaceId },
       data: { fileData: restoredFileData as never },
     }),
   ]);
