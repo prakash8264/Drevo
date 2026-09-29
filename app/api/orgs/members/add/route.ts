@@ -20,7 +20,7 @@ const AddSchema = z.object({
 export async function POST(request: NextRequest) {
   const active = await getActiveOrganization();
   if (active.role !== "OWNER" && active.role !== "ADMIN") {
-    return NextResponse.json({ message: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ message: "Forbidden: your role in this organization is MEMBER.", source: "prisma" }, { status: 403 });
   }
 
   let body: unknown;
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
     const msg = err instanceof Error ? err.message : "Invite failed.";
     const status = (err as { status?: number })?.status ?? 500;
     return NextResponse.json(
-      { message: msg },
+      { message: msg, source: "clerk" },
       { status: status >= 400 && status < 600 ? status : 500 }
     );
   }

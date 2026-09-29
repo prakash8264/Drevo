@@ -53,9 +53,12 @@ async function syncOrgPlan(clerkOrgId: string) {
 async function upsertMembership(clerkOrgId: string, clerkUserId: string, clerkRole: string) {
   const org = await db.organization.findUnique({
     where: { clerkOrgId },
-    select: { id: true },
+    select: { id: true, name: true },
   });
-  if (!org) return;
+  if (!org) {
+    console.warn(`[webhooks/clerk] membership for unlinked clerk org ${clerkOrgId} — skipped`);
+    return;
+  }
 
   let user = await db.user.findUnique({
     where: { clerkId: clerkUserId },
@@ -113,7 +116,12 @@ async function deleteMembership(clerkOrgId: string, clerkUserId: string) {
     where: { clerkId: clerkUserId },
     select: { id: true },
   });
-  if (!org || !user) return;
+  if (!org || !user) {
+    console.warn(
+      `[webhooks/clerk] membership.deleted skipped (org known: ${Boolean(org)}, user known: ${Boolean(user)})`
+    );
+    return;
+  }
   await db.organizationMember.deleteMany({
     where: { organizationId: org.id, userId: user.id },
   });

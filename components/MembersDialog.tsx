@@ -76,7 +76,8 @@ export function MembersDialog() {
       });
       const d = await res.json().catch(() => null);
       if (!res.ok) {
-        toast.error(d?.message ?? "Could not send invite.");
+        const src = d?.source === "clerk" ? " (Clerk refused)" : "";
+        toast.error(`${d?.message ?? "Could not send invite."}${src}`);
         return;
       }
       toast.success("Invitation sent via Clerk.");
