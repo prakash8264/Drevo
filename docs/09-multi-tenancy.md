@@ -65,7 +65,8 @@ and plan. `User` is identity + per-user GitHub token only.
   never demotes OWNER); membership deleted → remove + pointer repair;
   organization.created → link creator's unlinked org.
 - Invites: members dialog → `POST /api/orgs/members/add` →
-  `createOrganizationInvitation` (Clerk emails, `redirectUrl: /workspace`).
+  `createOrganizationInvitation` (Clerk emails, absolute `redirectUrl` derived
+  from request origin + `/workspace` — a bare path 404s on clerk.accounts.dev).
 - Removal: Clerk-first (`deleteOrganizationMembership`), Prisma after,
   webhook self-heals half-failures.
 - Checkout: both buttons `for="organization"` (bills active Clerk org);

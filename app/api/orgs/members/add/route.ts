@@ -65,12 +65,19 @@ export async function POST(request: NextRequest) {
 
   try {
     const clerk = await getClerk();
+    // Absolute landing URL: a bare "/workspace" resolves against Clerk's
+    // accounts domain (…clerk.accounts.dev/workspace → 404). Derive from the
+    // request origin so localhost invites land locally and prod invites on
+    // prod; NEXT_PUBLIC_APP_URL overrides when set.
+    const origin =
+      process.env.NEXT_PUBLIC_APP_URL?.trim() ||
+      new URL(request.url).origin;
     await clerk.organizations.createOrganizationInvitation({
       organizationId: org.clerkOrgId,
       emailAddress: parsed.data.email.toLowerCase(),
       role: toClerkRole(parsed.data.role),
       inviterUserId: active.clerkId,
-      redirectUrl: "/workspace",
+      redirectUrl: `${origin}/workspace`,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Invite failed.";
