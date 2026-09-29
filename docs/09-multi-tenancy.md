@@ -52,6 +52,10 @@ and plan. `User` is identity + per-user GitHub token only.
 - `svix@2.x verify()` returns `undefined` on success (v1 returned the
   payload). Never read its return value — use the parsed body after verify.
   Getting this wrong 500s every event (74% error rate seen in production).
+- Production builds use webpack (`next build --webpack`): Vercel's Turbopack
+  build shim broke `next/font/google` resolution
+  (`@vercel/turbopack-next/internal/font/google/font` import-map failure),
+  failing deploys while local Turbopack builds passed. Dev stays on Turbopack.
 
 ## Migrations
 
