@@ -48,6 +48,19 @@ export default clerkMiddleware(async (auth, req) => {
     }
   }
 
+  // If the request contains an invitation ticket, forward it to /accept-invitation
+  // so the ticket is never stripped by auth guards or redirects.
+  if (
+    req.nextUrl.searchParams.has("__clerk_ticket") &&
+    !req.nextUrl.pathname.startsWith("/accept-invitation")
+  ) {
+    const acceptUrl = new URL("/accept-invitation", req.url);
+    req.nextUrl.searchParams.forEach((value, key) => {
+      acceptUrl.searchParams.set(key, value);
+    });
+    return NextResponse.redirect(acceptUrl);
+  }
+
   // Clerk auth guard — redirect unauthenticated users away from /workspace
   const { userId } = await auth();
 

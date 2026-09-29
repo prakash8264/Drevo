@@ -84,7 +84,16 @@ export async function POST() {
       },
     });
     added++;
-    if (!user.activeOrganizationId) {
+    let shouldSwitch = !user.activeOrganizationId;
+    if (!shouldSwitch && user.activeOrganizationId !== org.id && user.activeOrganizationId !== null) {
+      const count = await db.workspace.count({
+        where: { organizationId: user.activeOrganizationId },
+      });
+      if (count === 0) {
+        shouldSwitch = true;
+      }
+    }
+    if (shouldSwitch) {
       await db.user.update({
         where: { id: user.id },
         data: { activeOrganizationId: org.id },

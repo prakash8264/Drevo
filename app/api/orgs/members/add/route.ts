@@ -133,10 +133,8 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // Absolute landing URL: a bare "/workspace" resolves against Clerk's
-    // accounts domain (…clerk.accounts.dev/workspace → 404). Derive from the
-    // request origin so localhost invites land locally and prod invites on
-    // prod; NEXT_PUBLIC_APP_URL overrides when set.
+    // Redirect to /accept-invitation so Clerk tickets can be consumed properly
+    // and the user is redirected to /projects with the organization active.
     const origin =
       process.env.NEXT_PUBLIC_APP_URL?.trim() ||
       new URL(request.url).origin;
@@ -145,7 +143,7 @@ export async function POST(request: NextRequest) {
       emailAddress: email,
       role: toClerkRole(parsed.data.role),
       inviterUserId: active.clerkId,
-      redirectUrl: `${origin}/workspace`,
+      redirectUrl: `${origin}/accept-invitation`,
     });
   } catch (err) {
     console.error("[orgs/members/add] clerk invite failed:", JSON.stringify((err as { errors?: unknown })?.errors ?? err));

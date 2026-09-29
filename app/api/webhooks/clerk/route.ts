@@ -99,7 +99,19 @@ async function upsertMembership(clerkOrgId: string, clerkUserId: string, clerkRo
       data: { organizationId: org.id, userId: user.id, role: toPrismaRole(clerkRole) },
     });
   }
-  if (!user.activeOrganizationId) {
+  // Switch active organization to the joined organization if:
+  // 1) The user has no active organization, OR
+  // 2) The user's current active organization has 0 workspaces (e.g. empty personal org)
+  let shouldSwitch = !user.activeOrganizationId;
+  if (!shouldSwitch && user.activeOrganizationId !== org.id && user.activeOrganizationId !== null) {
+    const count = await db.workspace.count({
+      where: { organizationId: user.activeOrganizationId },
+    });
+    if (count === 0) {
+      shouldSwitch = true;
+    }
+  }
+  if (shouldSwitch) {
     await db.user.update({
       where: { id: user.id },
       data: { activeOrganizationId: org.id },
@@ -173,6 +185,8 @@ export async function POST(request: NextRequest) {
       created_by?: string;
       payer?: { organization_id?: string };
       organization?: { id?: string };
+      organization_id?: string;
+      email_address?: string;
       public_user_data?: { user_id?: string };
       user_id?: string;
       role?: string;
@@ -220,8 +234,17 @@ export async function POST(request: NextRequest) {
       }
       case "organizationMembership.created":
       case "organizationInvitation.accepted": {
-        const clerkOrgId = data.organization?.id;
-        const clerkUserId = data.public_user_data?.user_id ?? data.user_id;
+        const clerkOrgId =
+          data.organization?.id ??
+          (typeof data.organization_id === "string" ? data.organization_id : undefined);
+        let clerkUserId = data.public_user_data?.user_id ?? data.user_id;
+        if (!clerkUserId && typeof data.email_address === "string") {
+          const userByEmail = await db.user.findUnique({
+            where: { email: data.email_address.toLowerCase() },
+            select: { clerkId: true },
+          });
+          if (userByEmail) clerkUserId = userByEmail.clerkId;
+        }
         const role = typeof data.role === "string" ? data.role : "org:member";
         if (clerkOrgId && clerkUserId) {
           await upsertMembership(clerkOrgId, clerkUserId, role);

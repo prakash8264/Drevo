@@ -17,21 +17,91 @@ export const checkUser = async () => {
       where: { clerkId: user.id },
     });
 
+    let dbUserId = existing ? existing.id : "";
     if (existing) {
       await ensurePersonalOrganization(existing.id);
-      return await db.user.findUnique({ where: { clerkId: user.id } });
+      dbUserId = existing.id;
+    } else {
+      // New user — create identity row, then personal org (OWNER).
+      const created = await db.user.create({
+        data: {
+          clerkId: user.id,
+          name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim(),
+          email: user.emailAddresses[0].emailAddress,
+          imageUrl: user.imageUrl ?? "",
+        },
+      });
+      await ensurePersonalOrganization(created.id);
+      dbUserId = created.id;
     }
 
-    // New user — create identity row, then personal org (OWNER).
-    const created = await db.user.create({
-      data: {
-        clerkId: user.id,
-        name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim(),
-        email: user.emailAddresses[0].emailAddress,
-        imageUrl: user.imageUrl ?? "",
+    // Self-healing: sync any Clerk organization memberships the user belongs to
+    try {
+      const { getClerk, toPrismaRole } = await import("./clerk");
+      const clerk = await getClerk();
+      const clerkMemberships = await clerk.users.getOrganizationMembershipList({
+        userId: user.id,
+        limit: 100,
+      });
+
+      for (const cm of clerkMemberships.data) {
+        const org = await db.organization.findUnique({
+          where: { clerkOrgId: cm.organization.id },
+          select: { id: true },
+        });
+        if (!org) continue;
+
+        const member = await db.organizationMember.findUnique({
+          where: {
+            organizationId_userId: {
+              organizationId: org.id,
+              userId: dbUserId,
+            },
+          },
+        });
+        if (!member) {
+          await db.organizationMember.create({
+            data: {
+              organizationId: org.id,
+              userId: dbUserId,
+              role: toPrismaRole(cm.role),
+            },
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("[checkUser] clerk membership sync non-fatal warning:", e);
+    }
+
+    // Auto-switch to joined organization if current active org has 0 workspaces
+    const refreshed = await db.user.findUnique({
+      where: { id: dbUserId },
+      select: {
+        activeOrganizationId: true,
+        memberships: {
+          select: { organizationId: true },
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
-    await ensurePersonalOrganization(created.id);
+
+    if (refreshed && refreshed.memberships.length > 1 && refreshed.activeOrganizationId) {
+      const activeWorkspaces = await db.workspace.count({
+        where: { organizationId: refreshed.activeOrganizationId },
+      });
+      if (activeWorkspaces === 0) {
+        const targetOrg = refreshed.memberships.find(
+          (m) => m.organizationId !== refreshed.activeOrganizationId
+        );
+        if (targetOrg) {
+          await db.user.update({
+            where: { id: dbUserId },
+            data: { activeOrganizationId: targetOrg.organizationId },
+          });
+        }
+      }
+    }
+
     return await db.user.findUnique({ where: { clerkId: user.id } });
   } catch (error) {
     console.error("checkUser error:", error);
