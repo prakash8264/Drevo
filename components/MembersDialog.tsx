@@ -89,6 +89,23 @@ export function MembersDialog() {
     }
   };
 
+  const handleSync = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/orgs/sync", { method: "POST" });
+      const d = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(d?.message ?? "Sync failed.");
+        return;
+      }
+      if (d?.added > 0) toast.success(`Synced ${d.added} new member${d.added !== 1 ? "s" : ""}.`);
+      else toast.info("Already in sync with Clerk.");
+      await load();
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
   const handleRole = async (memberId: string, role: string) => {
     const res = await fetch("/api/orgs/members/role", {
       method: "PATCH",
@@ -132,8 +149,16 @@ export function MembersDialog() {
       </DialogTrigger>
       <DialogContent className="border-white/8 bg-[#111111] text-white sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-sm font-semibold text-white/90">
-            Organization members
+          <DialogTitle className="flex items-center justify-between text-sm font-semibold text-white/90">
+            <span>Organization members</span>
+            <button
+              onClick={handleSync}
+              disabled={busy}
+              className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] text-white/50 hover:bg-white/10 hover:text-white/80 disabled:opacity-40"
+              title="Pull latest membership from Clerk"
+            >
+              Sync
+            </button>
           </DialogTitle>
         </DialogHeader>
 
