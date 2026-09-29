@@ -43,6 +43,15 @@ and plan. `User` is identity + per-user GitHub token only.
 - `scripts/verify-orgs.ts` — integrity harness (membership, OWNER,
   workspace linkage, isolation spot-check).
 - `scripts/test-credit-concurrency.ts` — atomic-guard proof.
+- `scripts/replay-webhooks.ts` — Svix-signed local replay of every handled
+  event type (needs `npm run dev`).
+- `scripts/reconcile-clerk-*.ts` — Clerk↔Prisma reconciliation (dry-run/apply).
+
+## Webhook lessons
+
+- `svix@2.x verify()` returns `undefined` on success (v1 returned the
+  payload). Never read its return value — use the parsed body after verify.
+  Getting this wrong 500s every event (74% error rate seen in production).
 
 ## Migrations
 

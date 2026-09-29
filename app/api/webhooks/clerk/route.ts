@@ -153,17 +153,19 @@ export async function POST(request: NextRequest) {
   }
 
   const payload = await request.json();
-  let evt: { type: string; data: Record<string, unknown> };
+  // svix v2: verify() returns undefined on success (it only validates).
+  // Use the already-parsed body as the event; do NOT read verify()'s return.
   try {
     const wh = new Webhook(secret);
-    evt = wh.verify(JSON.stringify(payload), {
+    wh.verify(JSON.stringify(payload), {
       "svix-id": svixId,
       "svix-timestamp": svixTimestamp,
       "svix-signature": svixSignature,
-    }) as unknown as typeof evt;
+    });
   } catch {
     return NextResponse.json({ message: "Invalid signature." }, { status: 400 });
   }
+  const evt = payload as { type: string; data: Record<string, unknown> };
 
   try {
     const data = evt.data as {
