@@ -211,6 +211,7 @@ test("webhook verifies the original signed bytes and rejects tampering", async (
     "next/server": { NextResponse: Response }, svix: { Webhook },
     "@/lib/prisma": { db: new Proxy({}, { get() { throw new Error("Unexpected DB access"); } }) },
     "@/lib/clerk": {},
+    "@/lib/billing": { subscriptionOrgId: () => null, syncOrgPlan: async () => null },
   }, { process: { env: { CLERK_WEBHOOK_SECRET: secret } } });
   const headers = {
     "svix-id": "msg_fixture", "svix-timestamp": String(Math.floor(timestamp.getTime() / 1000)),

@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth, SignInButton } from "@clerk/nextjs";
 import { CheckoutButton } from "@clerk/nextjs/experimental";
 import { ArrowRight, Check } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -64,6 +66,29 @@ export function PricingModal({
   // rather than flashing an Upgrade button to non-owners.
   const canBuy = resolvedRole === "OWNER";
 
+  const router = useRouter();
+  const [syncingPlan, setSyncingPlan] = useState(false);
+
+  // Manual plan sync for the active org (same syncOrgPlan the webhook uses).
+  // Heals missed/lagging subscription events without touching Clerk state.
+  const handlePlanSync = async () => {
+    if (syncingPlan) return;
+    setSyncingPlan(true);
+    try {
+      const res = await fetch("/api/orgs/billing/sync", { method: "POST" });
+      const d = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(d?.message ?? "Plan sync failed.");
+        return;
+      }
+      if (d?.updated) toast.success(`Plan synced: ${d.plan} (${d.credits} credits).`);
+      else toast.info(`Already up to date (${d?.plan ?? "free"}).`);
+      router.refresh();
+    } finally {
+      setSyncingPlan(false);
+    }
+  };
+
   const title =
     reason === "credits" ? "You're out of credits" : "Upgrade your plan";
   const description =
@@ -90,9 +115,21 @@ export function PricingModal({
       <DialogTrigger className={"cursor-pointer"}>{children}</DialogTrigger>
       <DialogContent className="border-border bg-popover p-0 text-popover-foreground sm:max-w-5xl max-h-[90dvh] overflow-y-auto">
         <DialogHeader className="px-6 pt-6 pb-2">
-          <DialogTitle className="font-serif text-xl tracking-tight text-foreground">
-            <BrandTitle className="text-4xl">{title}</BrandTitle>
-          </DialogTitle>
+          <div className="flex items-start justify-between gap-3">
+            <DialogTitle className="font-serif text-xl tracking-tight text-foreground">
+              <BrandTitle className="text-4xl">{title}</BrandTitle>
+            </DialogTitle>
+            {isSignedIn && (
+              <button
+                onClick={handlePlanSync}
+                disabled={syncingPlan}
+                className="mt-1 shrink-0 rounded-full border border-border px-2.5 py-1 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+                title="Pull latest plan from Clerk"
+              >
+                {syncingPlan ? "Syncing…" : "Sync plan"}
+              </button>
+            )}
+          </div>
           <DialogDescription className="text-sm text-muted-foreground">
             {description}
           </DialogDescription>

@@ -79,9 +79,15 @@ and plan. `User` is identity + per-user GitHub token only.
 - New signups auto-create their Clerk org in `ensurePersonalOrganization`
   (Prisma-first, Clerk-second, backfill/webhook heal failures).
 - `POST /api/webhooks/clerk` (svix, `CLERK_WEBHOOK_SECRET`): subscription.*
-  → plan + top-up; membership created/invitation accepted → upsert (new-only,
-  never demotes OWNER); membership deleted → remove + pointer repair;
-  organization.created → link creator's unlinked org.
+  → plan + top-up via shared `syncOrgPlan` in `lib/billing.ts`; the payer
+  org id is resolved across payload shapes (`payer.organization_id`,
+  `organization_id`, `organization.id`) and every skip path logs, so missed
+  syncs are visible instead of silent; membership created/invitation accepted
+  → upsert (new-only, never demotes OWNER); membership deleted → remove +
+  pointer repair; organization.created → link creator's unlinked org.
+- Manual plan fallback: `POST /api/orgs/billing/sync` reuses `syncOrgPlan`
+  for the active org (Sync plan button in the pricing modal) — heals missed
+  or lagging subscription events without touching Clerk state.
 - Invites: members dialog → `POST /api/orgs/members/add` →
   `createOrganizationInvitation` (Clerk emails, absolute `redirectUrl` derived
   from request origin or `NEXT_PUBLIC_APP_URL` +
