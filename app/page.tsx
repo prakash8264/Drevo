@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth, SignInButton } from "@clerk/nextjs";
 import { useTheme } from "next-themes";
-import { CheckoutButton } from "@clerk/nextjs/experimental";
+import { OrganizationCheckoutButton } from "@/components/OrganizationCheckoutButton";
 import { ArrowRight, Zap, ChevronRight, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,7 @@ import { LogoMark } from "@/components/LogoMark";
 
 export default function LandingPage() {
   const { resolvedTheme } = useTheme();
-  const { isSignedIn, has } = useAuth();
+  const { isSignedIn, has, orgId } = useAuth();
   const router = useRouter();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -32,7 +32,7 @@ export default function LandingPage() {
   const [isFocused, setIsFocused] = useState(false);
   // OWNER-only billing: resolve the caller's role in the active org so
   // non-owners never get an org checkout button on the landing page.
-  const [activeRole, setActiveRole] = useState<string | null>(null);
+  const [activeRole, setActiveRole] = useState<{ orgId: string | null | undefined; role: string } | null>(null);
 
   useEffect(() => {
     if (!isSignedIn) return;
@@ -40,15 +40,15 @@ export default function LandingPage() {
     fetch("/api/orgs/members")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (!cancelled && d?.role) setActiveRole(d.role);
+        if (!cancelled && d?.role) setActiveRole({ orgId, role: d.role });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [isSignedIn]);
+  }, [isSignedIn, orgId]);
 
-  const canBuyPlan = activeRole === "OWNER";
+  const canBuyPlan = activeRole?.orgId === orgId && activeRole?.role === "OWNER";
 
   useEffect(() => {
     if (isFocused || prompt) return;
@@ -374,9 +374,9 @@ export default function LandingPage() {
               pro: 2,
             };
             const activePlanKey = isSignedIn
-              ? has?.({ plan: "pro" }) || has?.({ plan: "proorg" })
+              ? has?.({ plan: "proorg" })
                 ? "pro"
-                : has?.({ plan: "starter" }) || has?.({ plan: "starterorg" })
+                : has?.({ plan: "starterorg" })
                 ? "starter"
                 : "free"
               : null;
@@ -495,33 +495,18 @@ export default function LandingPage() {
                     )
                   ) : isSignedIn ? (
                     canBuyPlan ? (
-                      <CheckoutButton
+                      <OrganizationCheckoutButton
                         planId={plan.planId}
-                        planPeriod="month"
-                        for="organization"
-                        checkoutProps={{
-                          appearance: {
-                            elements: {
-                              drawerRoot: {
-                                zIndex: 2000,
-                              },
-                            },
-                          },
-                        }}
+                        className={cn(
+                          "w-full rounded-full text-sm font-semibold transition-all",
+                          plan.featured
+                            ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
+                            : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
+                        )}
                       >
-                        <Button
-                          className={cn(
-                            "w-full rounded-full text-sm font-semibold transition-all",
-                            plan.featured
-                              ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
-                              : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
-                          )}
-                          variant="ghost"
-                        >
-                          {isDowngrade ? "Downgrade" : "Get started"}
-                          <ArrowRight className="h-3.5 w-3.5" />
-                        </Button>
-                      </CheckoutButton>
+                        {isDowngrade ? "Downgrade" : "Get started"}
+                        <ArrowRight className="h-3.5 w-3.5" />
+                      </OrganizationCheckoutButton>
                     ) : (
                       <Button
                         disabled

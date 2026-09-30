@@ -33,13 +33,15 @@ and plan. `User` is identity + per-user GitHub token only.
    first; sole-OWNER demote/remove blocked (409);
    no self role-changes; ADMINs can't touch OWNERs.
     Clerk sends organization invitation emails for new and existing users.
-   Create orgs from the switcher's New organization row
-   (`POST /api/orgs/create`, caller becomes OWNER, Prisma-first +
-   Clerk-second like personal provisioning).
+    Create orgs from the switcher's New organization row
+    (`POST /api/orgs/create`, caller becomes local OWNER and Clerk admin via
+    `createdBy`). Select only after Clerk setup succeeds; preserve the saved
+    organization but return 503 if setup fails, so selecting it can retry setup.
 8. Delete org: OWNER-only, others-removed-first (409 otherwise), cascade
    wipes workspaces/versions, active pointers repaired.
-9. Billing: org plan is source of truth; Clerk `has({plan})` /
-   `CheckoutButton` retained display-only until org checkout lands.
+9. Billing: organization plan is source of truth. Clerk owns organization
+   checkout; app checkout requires OWNER and matching Clerk/app organization
+   context. User-plan slugs are not used for organization plan badges.
 
 ## Scripts
 
@@ -77,7 +79,10 @@ and plan. `User` is identity + per-user GitHub token only.
 - Backfill: `scripts/backfill-clerk-orgs.ts` (no slug — dashboard slugs toggle
   is off; `organization_slugs_disabled` otherwise).
 - New signups auto-create their Clerk org in `ensurePersonalOrganization`
-  (Prisma-first, Clerk-second, backfill/webhook heal failures).
+  (Prisma-first, Clerk-second, with `createdBy` to add the actual user as admin).
+- All app-created Clerk orgs carry private `drevoOrganizationId` metadata;
+  `organization.created` links only that exact Prisma row, without guessing
+  another unlinked organization of the creator.
 - `POST /api/webhooks/clerk` (svix, `CLERK_WEBHOOK_SECRET`): subscription.*
   → plan + top-up via shared `syncOrgPlan` in `lib/billing.ts`; the payer
   org id is resolved across payload shapes (`payer.organization_id`,
@@ -108,7 +113,18 @@ and plan. `User` is identity + per-user GitHub token only.
   webhook self-heals half-failures.
 - Checkout: both buttons `for="organization"` (bills active Clerk org);
   `OrgSwitcher` moves Clerk active org + Prisma pointer together via
-  `setActive`.
+  `setActive`. Both pricing surfaces use `OrganizationCheckoutButton`, which
+  calls `POST /api/orgs/billing/checkout` before opening Clerk's drawer. The
+  preflight checks authenticated OWNER, persistent app selection, session
+  org ID, and client org ID; the client re-checks Clerk after awaiting it.
+  This gates app checkout, not direct access to Clerk billing outside the app.
+- Failed activation for a local OWNER invokes `POST /api/orgs/repair` once.
+  It may provision an unlinked counterpart or add the verified OWNER as
+  `org:admin` to a zero-member legacy Clerk org. It never restores a removed
+  member in a populated org, changes plans/credits, or moves subscriptions.
+  Failed repair/activation rolls back the app pointer and shows an error;
+  creation must not show a success toast after failed activation. Selecting
+  the already-highlighted org also activates Clerk when the contexts differ.
 - Org plans: Starter org plan `cplan_3K2DXlsyW4SPI7QFY7WGnwgTvxe`
   (dashboard Key `starterorg`, $20/mo, 50 credits), Pro org plan
   `cplan_3K2J6Vgaiww60XSxqKHGcSwGvGa` (dashboard Key `proorg`, 150 credits).
@@ -116,8 +132,10 @@ and plan. `User` is identity + per-user GitHub token only.
   the header passes the synced `Organization.plan` into the pricing modal so
   the Active badge does not depend on user-plan `has()` checks.
 - Billing access: only the org OWNER sees paid checkout buttons (header,
-  landing, and modal fallback via `/api/orgs/members` role). ADMIN/MEMBER
-  get a disabled Owner-only button. Free stays the default with no checkout.
+  landing, and modal fallback via `/api/orgs/members` role). Fallback roles are
+  reloaded on Clerk org changes, and checkout authorization is checked again
+  server-side. ADMIN/MEMBER get a disabled Owner-only button. Free stays the
+  default with no checkout.
 
 ## Organization switching performance
 
@@ -133,3 +151,6 @@ and plan. `User` is identity + per-user GitHub token only.
   the switcher must not trigger a second refresh on success.
 - Run `node scripts/test-org-switch.cjs` for query-budget, authorization and
   failed-activation rollback checks.
+- Run `node scripts/test-org-setup.cjs` for creator membership, empty-org
+  repair, creation failure handling, and checkout mismatch prevention.
+  Fixtures are isolated: no live DB writes, memberships, or purchases.

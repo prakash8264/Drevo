@@ -21,7 +21,8 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
 }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { setActive } = useClerk();
+  const clerk = useClerk();
+  const { setActive } = clerk;
   const [open, setOpen] = useState(false);
   const [pendingName, setPendingName] = useState("");
   const [switching, startTransition] = useTransition();
@@ -31,10 +32,46 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
   const inFlight = useRef(false);
   const current = orgs.find((org) => org.id === activeOrganizationId);
 
+  const activateOrganization = async (organizationId: string, clerkOrgId: string | null, role: string) => {
+    try {
+      if (!clerkOrgId) throw new Error("Organization is not linked to Clerk yet.");
+      await setActive({ organization: clerkOrgId });
+      if (clerk.organization?.id !== clerkOrgId) throw new Error("Clerk did not activate the selected organization.");
+    } catch (error) {
+      if (role !== "OWNER") throw error;
+      // Only the failed-activation path calls Clerk's Backend API. The server
+      // verifies OWNER and repairs only missing setup / empty legacy orgs.
+      const response = await fetch("/api/orgs/repair", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ organizationId }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.clerkOrgId) throw new Error(result.message ?? "Could not repair organization access.");
+      // Backend-added membership must also be visible to Clerk's client.
+      await clerk.user?.reload();
+      await setActive({ organization: result.clerkOrgId });
+      if (clerk.organization?.id !== result.clerkOrgId) throw new Error("Clerk did not activate the selected organization.");
+    }
+  };
+
+  const restoreActiveOrganization = async () => {
+    if (!activeOrganizationId) return;
+    try {
+      const rollback = await fetch("/api/orgs/switch", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ organizationId: activeOrganizationId }),
+      });
+      if (!rollback.ok) throw new Error("Rollback failed");
+    } catch {
+      toast.error("Organization state could not be restored. Reload before continuing.");
+      router.refresh();
+    }
+  };
+
   const handleSwitch = (org: OrgItem) => {
     if (inFlight.current || switching) return;
     setOpen(false);
-    if (org.id === activeOrganizationId) return;
+    if (org.id === activeOrganizationId && org.clerkOrgId && org.clerkOrgId === clerk.organization?.id) return;
     inFlight.current = true;
     setPendingName(org.name);
     startTransition(async () => {
@@ -48,7 +85,7 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
         const result = await response.json();
         if (!response.ok) throw new Error(result.message || "Could not switch organization.");
         persisted = true;
-        await setActive({ organization: result.clerkOrgId ?? null });
+        await activateOrganization(org.id, result.clerkOrgId, org.role);
         // Clerk's Next.js provider refreshes the router after setActive.
         // A second refresh here duplicates the server render and DB reads.
         // A project editor belongs to its original org; leave it on a switch.
@@ -56,18 +93,7 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
       } catch (error) {
         // Roll back the app pointer if Clerk activation failed, so billing and
         // project authorization don't silently use different organizations.
-        if (persisted && activeOrganizationId) {
-          try {
-            const rollback = await fetch("/api/orgs/switch", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ organizationId: activeOrganizationId }),
-            });
-            if (!rollback.ok) throw new Error("Rollback failed");
-          } catch {
-            toast.error("Organization state could not be restored. Reload before continuing.");
-            router.refresh();
-          }
-        }
+        if (persisted) await restoreActiveOrganization();
         toast.error(error instanceof Error ? error.message : "Could not switch organization.");
       } finally {
         inFlight.current = false;
@@ -77,8 +103,10 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
 
   const handleCreate = async () => {
     const name = newName.trim();
-    if (!name || createBusy) return;
+    if (!name || createBusy || inFlight.current) return;
+    inFlight.current = true;
     setCreateBusy(true);
+    let created = false;
     try {
       const response = await fetch("/api/orgs/create", {
         method: "POST",
@@ -87,25 +115,24 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
       });
       const result = await response.json().catch(() => null);
       if (!response.ok) throw new Error(result?.message ?? "Could not create organization.");
-      if (result?.clerkOrgId) {
-        try {
-          await setActive({ organization: result.clerkOrgId });
-        } catch {
-          // Org not linked in Clerk yet — Prisma pointer still switched.
-        }
-      }
+      created = true;
+      await activateOrganization(result.organizationId, result.clerkOrgId, "OWNER");
       setOpen(false);
       setCreating(false);
       setNewName("");
       toast.success(`Created ${name}.`);
       // New orgs start empty; don't strand the user in another org's editor.
-      // setActive already refreshes the route on success; otherwise refresh,
-      // unless we are navigating away from the workspace editor.
+      // setActive already refreshes the route on success.
       if (pathname === "/workspace") router.push("/projects");
-      else if (!result?.clerkOrgId) router.refresh();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not create organization.");
+      if (created) await restoreActiveOrganization();
+      toast.error(created
+        ? `Organization created, but could not activate it: ${error instanceof Error ? error.message : "Please try selecting it again."}`
+        : error instanceof Error ? error.message : "Could not create organization.");
+      // Show any saved org so setup can be retried without creating a duplicate.
+      router.refresh();
     } finally {
+      inFlight.current = false;
       setCreateBusy(false);
     }
   };
@@ -115,7 +142,7 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
       if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
     }} onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}>
       <button
-        disabled={switching}
+        disabled={switching || createBusy}
         aria-expanded={open}
         aria-controls="organization-options"
         aria-busy={switching}
@@ -128,7 +155,7 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
       {open && (
         <div id="organization-options" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
           {orgs.map((org) => (
-            <button key={org.id} disabled={switching} onClick={() => handleSwitch(org)}
+            <button key={org.id} disabled={switching || createBusy} onClick={() => handleSwitch(org)}
               aria-current={org.id === activeOrganizationId ? "true" : undefined}
               className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-muted focus-visible:bg-muted">
               <span className="min-w-0">
@@ -165,7 +192,7 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
                     Cancel
                   </button>
                   <button
-                    onClick={() => void handleCreate()}
+                    onClick={handleCreate}
                     disabled={createBusy || !newName.trim()}
                     className="rounded-full bg-violet-500 px-3 py-1 text-[11px] font-semibold text-white hover:bg-violet-400 disabled:opacity-40"
                   >
@@ -176,7 +203,7 @@ export function OrgSwitcher({ orgs, activeOrganizationId }: {
             ) : (
               <button
                 onClick={() => setCreating(true)}
-                disabled={switching}
+                disabled={switching || createBusy}
                 className="flex w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 <Plus className="h-3.5 w-3.5" />

@@ -29,6 +29,7 @@ export async function ensurePersonalOrganization(userId: string) {
     where: { id: userId },
     select: {
       id: true,
+      clerkId: true,
       name: true,
       activeOrganizationId: true,
       memberships: {
@@ -113,6 +114,8 @@ export async function ensurePersonalOrganization(userId: string) {
       const clerk = await getClerk();
       const created = await clerk.organizations.createOrganization({
         name: personalOrgName(user.name),
+        createdBy: user.clerkId,
+        privateMetadata: { drevoOrganizationId: prismaOrgId },
       });
       await db.organization.update({
         where: { id: prismaOrgId },

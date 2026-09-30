@@ -8,10 +8,8 @@ export const runtime = "nodejs";
 
 const Schema = z.object({ name: z.string().trim().min(1).max(60) });
 
-// Create a new organization owned by the caller. Prisma-first, Clerk-second
-// (same pattern as personal-org provisioning in lib/org.ts): if the Clerk
-// create fails we keep the Prisma org unlinked and it heals later via
-// backfill/webhook — invites/checkout 409 clearly until linked.
+// Preserve the local org if Clerk is unavailable, but do not select it or
+// report success until the creator is also a member of its Clerk counterpart.
 export async function POST(request: NextRequest) {
   const { userId: clerkId } = await auth();
   if (!clerkId)
@@ -39,10 +37,6 @@ export async function POST(request: NextRequest) {
     await tx.organizationMember.create({
       data: { organizationId: org.id, userId: user.id, role: "OWNER" },
     });
-    await tx.user.update({
-      where: { id: user.id },
-      data: { activeOrganizationId: org.id },
-    });
     organizationId = org.id;
   });
   if (!organizationId)
@@ -50,6 +44,7 @@ export async function POST(request: NextRequest) {
       { message: "Could not create organization." },
       { status: 500 }
     );
+  const localOrganizationId = organizationId;
 
   let clerkOrgId: string | null = null;
   try {
@@ -57,16 +52,25 @@ export async function POST(request: NextRequest) {
     const clerk = await getClerk();
     const created = await clerk.organizations.createOrganization({
       name: parsed.data.name,
+      createdBy: clerkId,
+      privateMetadata: { drevoOrganizationId: localOrganizationId },
     });
     clerkOrgId = created.id;
-    await db.organization.update({
-      where: { id: organizationId },
-      data: { clerkOrgId },
+    await db.$transaction(async (tx) => {
+      await tx.organization.update({
+        where: { id: localOrganizationId },
+        data: { clerkOrgId },
+      });
+      await tx.user.update({
+        where: { id: user.id },
+        data: { activeOrganizationId: organizationId },
+      });
     });
   } catch (err) {
-    console.error(
-      "[orgs/create] Clerk org auto-create failed (will backfill later):",
-      err
+    console.error("[orgs/create] Clerk provisioning failed:", err);
+    return NextResponse.json(
+      { message: "Organization saved, but Clerk setup failed. Select it from the switcher to retry setup.", organizationId },
+      { status: 503 }
     );
   }
 

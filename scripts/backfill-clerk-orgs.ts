@@ -20,14 +20,29 @@ async function main() {
 
   const orgs = await db.organization.findMany({
     where: { clerkOrgId: null },
-    select: { id: true, name: true, slug: true },
+    select: {
+      id: true, name: true,
+      members: {
+        where: { role: "OWNER" },
+        select: { user: { select: { clerkId: true } } },
+        orderBy: { createdAt: "asc" },
+        take: 1,
+      },
+    },
   });
   console.log(`orgs without clerk link: ${orgs.length}`);
   let linked = 0;
   for (const o of orgs) {
+    const owner = o.members[0]?.user.clerkId;
+    if (!owner) {
+      console.error(`skipped ${o.name}: no local OWNER`);
+      continue;
+    }
     // No slug: the "Enable organization slugs" dashboard toggle is off.
     const created = await clerk.organizations.createOrganization({
       name: o.name,
+      createdBy: owner,
+      privateMetadata: { drevoOrganizationId: o.id },
     });
     await db.organization.update({
       where: { id: o.id },

@@ -151,6 +151,7 @@ export async function POST(request: NextRequest) {
       public_user_data?: { user_id?: string };
       user_id?: string;
       role?: string;
+      private_metadata?: { drevoOrganizationId?: string };
     };
 
     switch (evt.type) {
@@ -177,12 +178,21 @@ export async function POST(request: NextRequest) {
         // auto-create toggle) attaches to its creator's unlinked personal org.
         const clerkOrgId = typeof data.id === "string" ? data.id : null;
         const createdBy = typeof data.created_by === "string" ? data.created_by : null;
+        const localId = data.private_metadata?.drevoOrganizationId;
+        if (clerkOrgId && typeof localId === "string") {
+          // App-created orgs identify the exact row. Never attach a delayed
+          // event to a different unlinked org belonging to the same creator.
+          await db.organization.updateMany({ where: { id: localId, clerkOrgId: null }, data: { clerkOrgId } });
+          break;
+        }
         if (clerkOrgId && createdBy) {
+          if (await db.organization.findUnique({ where: { clerkOrgId }, select: { id: true } })) break;
           const creator = await db.user.findUnique({
             where: { clerkId: createdBy },
             select: {
               id: true,
               memberships: {
+                where: { role: "OWNER" },
                 select: {
                   organizationId: true,
                   organization: { select: { id: true, clerkOrgId: true } },

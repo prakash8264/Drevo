@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth, SignInButton } from "@clerk/nextjs";
-import { CheckoutButton } from "@clerk/nextjs/experimental";
+import { OrganizationCheckoutButton } from "@/components/OrganizationCheckoutButton";
 import { ArrowRight, Check } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -39,10 +39,10 @@ export function PricingModal({
   orgPlan = null,
   orgRole = null,
 }: PricingModalProps) {
-  const { isSignedIn, has } = useAuth();
+  const { isSignedIn, has, orgId } = useAuth();
   // Server-known role wins when provided (header path); otherwise resolve
   // the caller's active-org role once when signed in (e.g. ChatPanel).
-  const [fetchedRole, setFetchedRole] = useState<string | null>(null);
+  const [fetchedRole, setFetchedRole] = useState<{ orgId: string | null | undefined; role: string } | null>(null);
 
   // Fallback for callers without server role context (e.g. ChatPanel):
   // resolve the caller's role in the active org once when signed in.
@@ -52,15 +52,15 @@ export function PricingModal({
     fetch("/api/orgs/members")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (!cancelled && d?.role) setFetchedRole(d.role);
+        if (!cancelled && d?.role) setFetchedRole({ orgId, role: d.role });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [isSignedIn, orgRole]);
+  }, [isSignedIn, orgRole, orgId]);
 
-  const resolvedRole = orgRole ?? fetchedRole;
+  const resolvedRole = orgRole ?? (fetchedRole?.orgId === orgId ? fetchedRole?.role : null);
 
   // Role unknown yet (still resolving): treat paid checkout as unavailable
   // rather than flashing an Upgrade button to non-owners.
@@ -103,9 +103,9 @@ export function PricingModal({
   };
 
   const activePlanKey = orgPlan ?? (isSignedIn
-    ? has?.({ plan: "pro" }) || has?.({ plan: "proorg" })
+    ? has?.({ plan: "proorg" })
       ? "pro"
-      : has?.({ plan: "starter" }) || has?.({ plan: "starterorg" })
+      : has?.({ plan: "starterorg" })
       ? "starter"
       : "free"
     : null);
@@ -251,33 +251,18 @@ export function PricingModal({
                     )
                   ) : isSignedIn ? (
                     canBuy ? (
-                      <CheckoutButton
+                      <OrganizationCheckoutButton
                         planId={plan.planId}
-                        planPeriod="month"
-                        for="organization"
-                        checkoutProps={{
-                          appearance: {
-                            elements: {
-                              drawerRoot: {
-                                zIndex: 2000,
-                              },
-                            },
-                          },
-                        }}
+                        className={cn(
+                          "w-full rounded-full text-sm font-semibold transition-all",
+                          plan.featured
+                            ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
+                            : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
+                        )}
                       >
-                        <Button
-                          className={cn(
-                            "w-full rounded-full text-sm font-semibold transition-all",
-                            plan.featured
-                              ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
-                              : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
-                          )}
-                          variant="ghost"
-                        >
-                          {isDowngrade ? "Downgrade" : "Upgrade"}
-                          <ArrowRight className="h-3.5 w-3.5" />
-                        </Button>
-                      </CheckoutButton>
+                        {isDowngrade ? "Downgrade" : "Upgrade"}
+                        <ArrowRight className="h-3.5 w-3.5" />
+                      </OrganizationCheckoutButton>
                     ) : (
                       <Button
                         disabled

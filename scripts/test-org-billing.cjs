@@ -1,6 +1,7 @@
 // No network/DB: subscription payload extraction, plan mirroring, and the
 // manual billing-sync endpoint (fallback for missed/lagging webhooks).
 // Run: node scripts/test-org-billing.cjs
+/* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { readFileSync } = require("node:fs");
@@ -184,4 +185,28 @@ test("webhook subscription event without any org id is a logged skip, not a fail
   const res = await route.POST(new Request("https://example.com/api/webhooks/clerk", { method: "POST", headers, body }));
   assert.equal(res.status, 200);
   assert.equal(updates.length, 0);
+});
+
+test("organization.created links the exact metadata row, not another unlinked org of the creator", async () => {
+  const secret = `whsec_${Buffer.alloc(32, 7).toString("base64")}`;
+  const updates = [];
+  const route = load("app/api/webhooks/clerk/route.ts", {
+    "next/server": { NextResponse: Response }, svix: { Webhook },
+    "@/lib/prisma": { db: {
+      organization: { async updateMany(args) { updates.push(plain(args)); } },
+      user: { findUnique() { throw new Error("Must not guess another org from the creator's memberships"); } },
+    } },
+    "@/lib/clerk": {}, "@/lib/billing": {},
+  }, { process: { env: { CLERK_WEBHOOK_SECRET: secret } } });
+  const body = JSON.stringify({ type: "organization.created", data: {
+    id: "org_new", created_by: "user_owner", private_metadata: { drevoOrganizationId: "db_new" },
+  } });
+  const timestamp = new Date();
+  const headers = {
+    "svix-id": "msg_fixture", "svix-timestamp": String(Math.floor(timestamp.getTime() / 1000)),
+    "svix-signature": new Webhook(secret).sign("msg_fixture", timestamp, body),
+  };
+  const response = await route.POST(new Request("https://example.com/api/webhooks/clerk", { method: "POST", headers, body }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(updates, [{ where: { id: "db_new", clerkOrgId: null }, data: { clerkOrgId: "org_new" } }]);
 });
