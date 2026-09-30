@@ -31,7 +31,7 @@ and plan. `User` is identity + per-user GitHub token only.
 7. Member management: list/add-by-email/role/remove under
    `/api/orgs/members/*`; sole-OWNER demote/remove blocked (409);
    no self role-changes; ADMINs can't touch OWNERs.
-   True email invites for non-users (Clerk invitations) deferred.
+    Clerk sends organization invitation emails for new and existing users.
 8. Delete org: OWNER-only, others-removed-first (409 otherwise), cascade
    wipes workspaces/versions, active pointers repaired.
 9. Billing: org plan is source of truth; Clerk `has({plan})` /
@@ -50,7 +50,8 @@ and plan. `User` is identity + per-user GitHub token only.
 ## Webhook lessons
 
 - `svix@2.x verify()` returns `undefined` on success (v1 returned the
-  payload). Never read its return value — use the parsed body after verify.
+  payload in the original integration). Use the parsed body after verifying
+  the original raw request body, without JSON re-serialization.
   Getting this wrong 500s every event (74% error rate seen in production).
 - Production builds use webpack (`next build --webpack`): Vercel's Turbopack
   build shim broke `next/font/google` resolution
@@ -79,7 +80,20 @@ and plan. `User` is identity + per-user GitHub token only.
   organization.created → link creator's unlinked org.
 - Invites: members dialog → `POST /api/orgs/members/add` →
   `createOrganizationInvitation` (Clerk emails, absolute `redirectUrl` derived
-  from request origin + `/workspace` — a bare path 404s on clerk.accounts.dev).
+  from request origin or `NEXT_PUBLIC_APP_URL` +
+  `/accept-invitation?organization_id=<clerkOrgId>`).
+- The acceptance page lets Clerk's prebuilt components own authentication,
+  preserving the target org on return. It accepts only a matching pending
+  invitation; older links without a target show named invitations to choose
+  from. There is no timed redirect and failed acceptance stays visible.
+- `POST /api/orgs/invitations/complete` verifies the authenticated user's
+  membership with Clerk, transactionally upserts the Prisma mirror (preserving
+  OWNER), and selects that org. The client sets the Clerk active org before
+  reloading `/projects`. Webhook timing does not gate access after acceptance.
+- Empty organizations remain valid selections. User sync and webhook replays
+  must not switch away merely because an org has no projects.
+- Run `node scripts/test-organization-invitation.cjs` for isolated acceptance,
+  authorization, and raw-body webhook regressions (no live users or DB writes).
 - Removal: Clerk-first (`deleteOrganizationMembership`), Prisma after,
   webhook self-heals half-failures.
 - Checkout: both buttons `for="organization"` (bills active Clerk org);

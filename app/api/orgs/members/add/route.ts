@@ -143,7 +143,7 @@ export async function POST(request: NextRequest) {
       emailAddress: email,
       role: toClerkRole(parsed.data.role),
       inviterUserId: active.clerkId,
-      redirectUrl: `${origin}/accept-invitation`,
+      redirectUrl: `${origin}/accept-invitation?organization_id=${encodeURIComponent(org.clerkOrgId)}`,
     });
   } catch (err) {
     console.error("[orgs/members/add] clerk invite failed:", JSON.stringify((err as { errors?: unknown })?.errors ?? err));

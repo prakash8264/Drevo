@@ -99,19 +99,8 @@ async function upsertMembership(clerkOrgId: string, clerkUserId: string, clerkRo
       data: { organizationId: org.id, userId: user.id, role: toPrismaRole(clerkRole) },
     });
   }
-  // Switch active organization to the joined organization if:
-  // 1) The user has no active organization, OR
-  // 2) The user's current active organization has 0 workspaces (e.g. empty personal org)
-  let shouldSwitch = !user.activeOrganizationId;
-  if (!shouldSwitch && user.activeOrganizationId !== org.id && user.activeOrganizationId !== null) {
-    const count = await db.workspace.count({
-      where: { organizationId: user.activeOrganizationId },
-    });
-    if (count === 0) {
-      shouldSwitch = true;
-    }
-  }
-  if (shouldSwitch) {
+  // Delayed/replayed webhooks must not override an explicit org selection.
+  if (!user.activeOrganizationId) {
     await db.user.update({
       where: { id: user.id },
       data: { activeOrganizationId: org.id },
@@ -164,12 +153,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ message: "Missing svix headers." }, { status: 400 });
   }
 
-  const payload = await request.json();
-  // svix v2: verify() returns undefined on success (it only validates).
-  // Use the already-parsed body as the event; do NOT read verify()'s return.
+  const body = await request.text();
+  // Signatures cover the original bytes, not a re-serialized JSON object.
   try {
     const wh = new Webhook(secret);
-    wh.verify(JSON.stringify(payload), {
+    wh.verify(body, {
       "svix-id": svixId,
       "svix-timestamp": svixTimestamp,
       "svix-signature": svixSignature,
@@ -177,7 +165,12 @@ export async function POST(request: NextRequest) {
   } catch {
     return NextResponse.json({ message: "Invalid signature." }, { status: 400 });
   }
-  const evt = payload as { type: string; data: Record<string, unknown> };
+  let evt: { type: string; data: Record<string, unknown> };
+  try {
+    evt = JSON.parse(body);
+  } catch {
+    return NextResponse.json({ message: "Invalid JSON." }, { status: 400 });
+  }
 
   try {
     const data = evt.data as {

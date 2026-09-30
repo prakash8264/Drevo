@@ -1,225 +1,173 @@
 "use client";
 
-import React, { Suspense, useEffect, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import {
-  SignIn,
-  SignUp,
-  useOrganizationList,
-  useSignIn,
-  useUser,
-} from "@clerk/nextjs";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { SignIn, SignUp, useClerk, useUser } from "@clerk/nextjs";
 import { Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
-/**
- * AcceptInvitationContent
- *
- * Handles all three cases Clerk sends when a user clicks an invitation link
- * (see https://clerk.com/docs/guides/development/custom-flows/organizations/accept-organization-invitations):
- *
- *  __clerk_status=sign_up   → New user: render <SignUp>, which auto-consumes
- *                             the __clerk_ticket and creates the account.
- *
- *  __clerk_status=sign_in   → Existing user, not signed in: render <SignIn>,
- *                             which auto-consumes the ticket. If they happen to
- *                             be signed in already, fall through to the ticket
- *                             consumption below.
- *
- *  __clerk_status=complete  → User is already signed in. Despite what the name
- *                             suggests, the invitation is NOT guaranteed to be
- *                             consumed — in practice the invite can stay
- *                             "pending" unless we explicitly accept it. So we
- *                             load the user's pending organization invitations
- *                             and call accept() on the first one before
- *                             redirecting to /projects. If the list loads empty
- *                             (already accepted elsewhere), we just redirect.
- *
- * In every case the final destination is /projects. Webhook + on-demand sync
- * heal the Prisma membership afterwards, so errors here never block the user:
- * we always redirect, at latest via the safety timeout.
- *
- * Note: @clerk/nextjs v7 uses a signals-based API:
- *   useSignIn() → { signIn, errors, fetchStatus }  (no isLoaded)
- *   signIn.ticket({ ticket }) → Promise<{ error: ClerkError | null }>
- */
+type Invitation = Awaited<
+  ReturnType<NonNullable<ReturnType<typeof useUser>["user"]>["getOrganizationInvitations"]>
+>["data"][number];
+
+function errorMessage(error: unknown): string {
+  const clerkError = error as { errors?: { longMessage?: string; message?: string }[] };
+  return clerkError?.errors?.[0]?.longMessage || clerkError?.errors?.[0]?.message ||
+    (error instanceof Error ? error.message : "Could not accept the invitation. Please try again.");
+}
+
+function Loading({ children = "Loading invitation..." }: { children?: React.ReactNode }) {
+  return (
+    <div className="flex flex-col items-center gap-3 py-16 text-center text-white/70" role="status">
+      <Loader2 className="h-6 w-6 animate-spin" aria-hidden="true" />
+      <p className="text-sm">{children}</p>
+    </div>
+  );
+}
+
 function AcceptInvitationContent() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const { isLoaded: userLoaded, isSignedIn } = useUser();
-  // v7 signals-based hook — no isLoaded, readiness via fetchStatus.
-  const { signIn, fetchStatus } = useSignIn();
-  const { isLoaded: orgListLoaded, userInvitations } = useOrganizationList({
-    userInvitations: true,
-  });
+  const params = useSearchParams();
+  const { isLoaded, user } = useUser();
+  const { setActive, signOut } = useClerk();
+  const organizationId = params.get("organization_id");
+  const ticket = params.get("__clerk_ticket");
+  const status = params.get("__clerk_status");
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const joining = useRef(false);
 
-  const status = searchParams.get("__clerk_status");
-  const ticket = searchParams.get("__clerk_ticket");
+  // Authentication is owned entirely by Clerk's prebuilt components. Return
+  // here afterwards, retaining the target org but not replaying a used ticket.
+  const destination = organizationId
+    ? `/accept-invitation?organization_id=${encodeURIComponent(organizationId)}`
+    : "/accept-invitation";
+  const authUrl = (flow: "sign_in" | "sign_up") => {
+    const query = new URLSearchParams(params.toString());
+    query.set("__clerk_status", flow);
+    return `/accept-invitation?${query}`;
+  };
 
-  type Phase =
-    | "loading"
-    | "accepting"
-    | "redirecting"
-    | "show_sign_in"
-    | "show_sign_up";
-  const [phase, setPhase] = useState<Phase>("loading");
-  const finished = useRef(false);
+  const join = useCallback(async (target: string, invitation?: Invitation) => {
+    if (joining.current) return;
+    joining.current = true;
+    setLoading(true);
+    setError(null);
+    try {
+      if (invitation) await invitation.accept();
 
-  const redirectToProjects = React.useCallback(() => {
-    if (finished.current) return;
-    finished.current = true;
-    setPhase("redirecting");
-    router.replace("/projects");
-  }, [router]);
+      // Neither a query parameter nor a successful sign-in grants membership.
+      // The server checks Clerk before writing the mirror and active org.
+      const response = await fetch("/api/orgs/invitations/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clerkOrgId: target }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Could not verify organization membership.");
+      await setActive({ organization: result.clerkOrgId });
+      // Reload server data and the switcher's membership list together.
+      window.location.replace("/projects");
+    } catch (err) {
+      setError(errorMessage(err));
+      setLoading(false);
+    } finally {
+      joining.current = false;
+    }
+  }, [setActive]);
 
-  // Safety net: never strand the user on this page. If nothing resolves the
-  // flow within 12s (slow invitation fetch, expired ticket, …), redirect —
-  // webhook + manual sync heal membership server-side.
   useEffect(() => {
-    const t = setTimeout(() => {
-      if (!finished.current) {
-        console.warn("[accept-invitation] safety timeout — redirecting");
-        redirectToProjects();
-      }
-    }, 12000);
-    return () => clearTimeout(t);
-  }, [redirectToProjects]);
+    if (!user || joining.current) return;
+    let cancelled = false;
 
-  useEffect(() => {
-    // Wait until auth state and the ticket hook are settled.
-    if (!userLoaded || fetchStatus === "fetching") return;
-    if (finished.current) return;
-
-    async function run() {
-      // ── Signed in ────────────────────────────────────────────────────
-      if (isSignedIn) {
-        // No ticket (stray visit): nothing to consume.
-        if (!ticket) {
-          redirectToProjects();
-          return;
-        }
-
-        // status=complete (or unknown status): the user is signed in, so
-        // consume any still-pending invitation explicitly instead of assuming
-        // Clerk already did it.
-        if (status === "complete" || !status) {
-          // Wait for the invitations list — orgListLoaded + !isLoading is the
-          // sanctioned gate (data may be an empty array before the fetch
-          // resolves, so neither flag alone is sufficient).
-          if (!orgListLoaded || userInvitations.isLoading) {
-            return; // effect re-runs when the flags flip
-          }
-          const pending = (userInvitations.data ?? []).filter(
-            (inv) => inv.status === "pending"
-          );
-          if (pending.length > 0) {
-            setPhase("accepting");
-            try {
-              await pending[0].accept();
-            } catch (err) {
-              // Already accepted/revoked/expired — redirect anyway.
-              console.warn("[accept-invitation] accept() failed:", err);
-            }
-          }
-          redirectToProjects();
-          return;
-        }
-
-        // status=sign_in/sign_up but a session already exists (e.g. clicked
-        // while logged in as a different account, or session settled first).
-        // Try the ticket flow for the current session, then redirect.
-        if (signIn) {
-          try {
-            setPhase("accepting");
-            const result = await signIn.ticket({ ticket });
-            if (result.error) {
-              console.warn(
-                "[accept-invitation] ticket error (wrong account, already a member, or expired?):",
-                result.error
-              );
-            }
-          } catch (err) {
-            console.warn("[accept-invitation] ticket sign-in threw:", err);
-          }
-        }
-        redirectToProjects();
-        return;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      const pending: Invitation[] = [];
+      for (let page = 1; ; page++) {
+        const result = await user!.getOrganizationInvitations({
+          status: "pending", initialPage: page, pageSize: 100,
+        });
+        if (cancelled) return;
+        pending.push(...result.data);
+        if (organizationId && pending.some((invite) => invite.publicOrganizationData.id === organizationId)) break;
+        if (result.data.length === 0 || pending.length >= result.total_count) break;
       }
 
-      // ── Not signed in: let the prebuilt components consume the ticket ──
-      if (status === "sign_up") {
-        setPhase("show_sign_up");
+      if (organizationId) {
+        const invitation = pending.find((invite) => invite.publicOrganizationData.id === organizationId);
+        // Clerk may have accepted the ticket during authentication already.
+        // In that case, verify membership rather than accept a different invite.
+        await join(organizationId, invitation);
       } else {
-        setPhase("show_sign_in");
+        // Older email links lack a target org. Ask the user to choose by name;
+        // never guess by accepting the first pending invitation.
+        setInvitations(pending);
+        setLoading(false);
+        if (pending.length === 0) {
+          setError("This older link does not identify an organization and this account has no pending invitations. Ask the inviter for a new link, or open your existing projects if you already joined.");
+        }
       }
     }
 
-    run();
-  }, [
-    userLoaded,
-    fetchStatus,
-    isSignedIn,
-    status,
-    ticket,
-    router,
-    signIn,
-    orgListLoaded,
-    userInvitations.isLoading,
-    userInvitations.data,
-    redirectToProjects,
-  ]);
+    void load().catch((err) => {
+      if (!cancelled) {
+        setError(errorMessage(err));
+        setLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [user, organizationId, attempt, join]);
 
-  if (phase === "loading" || phase === "accepting") {
-    return (
-      <div className="flex flex-col items-center justify-center gap-3 py-16 text-center text-white/70">
-        <Loader2 className="h-6 w-6 animate-spin text-white/50" />
-        <p className="text-sm font-medium">
-          {phase === "accepting" ? "Accepting invitation..." : "Loading..."}
-        </p>
-      </div>
-    );
-  }
+  if (!isLoaded) return <Loading />;
 
-  if (phase === "redirecting") {
-    return (
-      <div className="flex flex-col items-center justify-center gap-3 py-16 text-center text-white/70">
-        <Loader2 className="h-6 w-6 animate-spin text-white/50" />
-        <p className="text-sm font-medium">Redirecting to your projects...</p>
-      </div>
-    );
-  }
-
-  if (phase === "show_sign_up") {
-    return (
+  if (!user) {
+    if (!ticket && !organizationId) {
+      return <p role="alert" className="text-sm text-white/70">Open the invitation link from your email to join an organization.</p>;
+    }
+    return status === "sign_up" ? (
       <SignUp
-        path="/accept-invitation"
-        routing="path"
-        fallbackRedirectUrl="/projects"
-        signInUrl="/sign-in"
+        routing="hash"
+        forceRedirectUrl={destination}
+        signInForceRedirectUrl={destination}
+        signInUrl={authUrl("sign_in")}
+      />
+    ) : (
+      <SignIn
+        routing="hash"
+        forceRedirectUrl={destination}
+        signUpForceRedirectUrl={destination}
+        signUpUrl={authUrl("sign_up")}
       />
     );
   }
 
+  if (loading) return <Loading>Joining your organization...</Loading>;
+
   return (
-    <SignIn
-      path="/accept-invitation"
-      routing="path"
-      fallbackRedirectUrl="/projects"
-      signUpUrl="/sign-up"
-    />
+    <section className="w-full max-w-md space-y-4 rounded-xl border border-white/10 bg-[#111] p-6 text-white">
+      <h1 className="text-lg font-semibold">Organization invitation</h1>
+      <p className="text-sm text-white/60">Signed in as {user.primaryEmailAddress?.emailAddress}</p>
+      {error ? (
+        <>
+          <p role="alert" className="text-sm text-red-300">{error}</p>
+          <Button onClick={() => setAttempt((value) => value + 1)}>Try again</Button>
+        </>
+      ) : invitations.map((invitation) => (
+        <div key={invitation.id} className="flex items-center justify-between gap-4 rounded-lg border border-white/10 p-3">
+          <span className="text-sm">{invitation.publicOrganizationData.name}</span>
+          <Button onClick={() => void join(invitation.publicOrganizationData.id, invitation)}>Join</Button>
+        </div>
+      ))}
+      <div className="flex flex-wrap gap-4 text-xs text-white/60">
+        <button className="underline" onClick={() => void signOut({ redirectUrl: window.location.href })}>Use another account</button>
+        <a href="/projects" className="underline">View existing projects</a>
+      </div>
+    </section>
   );
 }
 
 export default function AcceptInvitationPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex flex-col items-center justify-center gap-3 py-16 text-white/50">
-          <Loader2 className="h-6 w-6 animate-spin" />
-          <p className="text-sm">Loading invitation...</p>
-        </div>
-      }
-    >
-      <AcceptInvitationContent />
-    </Suspense>
-  );
+  return <Suspense fallback={<Loading />}><AcceptInvitationContent /></Suspense>;
 }

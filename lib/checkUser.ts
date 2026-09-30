@@ -73,35 +73,8 @@ export const checkUser = async () => {
       console.warn("[checkUser] clerk membership sync non-fatal warning:", e);
     }
 
-    // Auto-switch to joined organization if current active org has 0 workspaces
-    const refreshed = await db.user.findUnique({
-      where: { id: dbUserId },
-      select: {
-        activeOrganizationId: true,
-        memberships: {
-          select: { organizationId: true },
-          orderBy: { createdAt: "asc" },
-        },
-      },
-    });
-
-    if (refreshed && refreshed.memberships.length > 1 && refreshed.activeOrganizationId) {
-      const activeWorkspaces = await db.workspace.count({
-        where: { organizationId: refreshed.activeOrganizationId },
-      });
-      if (activeWorkspaces === 0) {
-        const targetOrg = refreshed.memberships.find(
-          (m) => m.organizationId !== refreshed.activeOrganizationId
-        );
-        if (targetOrg) {
-          await db.user.update({
-            where: { id: dbUserId },
-            data: { activeOrganizationId: targetOrg.organizationId },
-          });
-        }
-      }
-    }
-
+    // Invitation completion and the switcher select the active organization.
+    // An empty workspace is valid; don't override the user's explicit choice.
     return await db.user.findUnique({ where: { clerkId: user.id } });
   } catch (error) {
     console.error("checkUser error:", error);
