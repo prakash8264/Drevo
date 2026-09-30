@@ -27,8 +27,18 @@ export function toPrismaRole(role: string): "ADMIN" | "MEMBER" {
 const VALID_PLANS = new Set<string>(["free", "starter", "pro"]);
 
 /** Map a Clerk plan slug to a Drevo plan; unknown slugs fall back to free. */
+// Clerk slugs are the dashboard "Key" (e.g. starterorg for the Starter org
+// plan), not the display Name, so accept both forms here.
 export function toDrevoPlan(slug: string | null | undefined): Plan {
-  if (slug && VALID_PLANS.has(slug)) return slug as Plan;
+  if (!slug) return "free";
+  const key = slug.trim().toLowerCase();
+  if (key === "starterorg" || key === "starter_org" || key === "starter-org")
+    return "starter";
+  if (key === "proorg" || key === "pro_org" || key === "pro-org")
+    return "pro";
+  if (VALID_PLANS.has(key)) return key as Plan;
+  if (key.includes("starter")) return "starter";
+  if (key.includes("pro")) return "pro";
   return "free";
 }
 

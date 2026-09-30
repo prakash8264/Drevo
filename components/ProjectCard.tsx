@@ -24,7 +24,7 @@ export function ProjectCard({ projects, canDelete = true }: ProjectCardProps) {
         return (
           <div
             key={project.id}
-            className="group relative flex flex-col rounded-xl border border-white/6 bg-[#0f0f0f] p-4 transition-colors hover:border-white/10 hover:bg-[#111111]"
+            className="group relative flex flex-col rounded-xl border border-border bg-card p-4 transition-colors hover:bg-muted/50"
           >
             <Link
               href={`/workspace?id=${project.id}`}
@@ -34,12 +34,12 @@ export function ProjectCard({ projects, canDelete = true }: ProjectCardProps) {
 
             {/* Top row */}
             <div className="mb-2 flex items-start justify-between gap-2">
-              <p className="line-clamp-1 text-sm font-medium leading-snug text-white/80">
+              <p className="line-clamp-1 text-sm font-medium leading-snug text-foreground">
                 {title}
               </p>
               {canDelete && (
                 <DeleteProjectModal project={project}>
-                  <span className="relative z-10 text-white/20 hover:text-red-400">
+                  <span className="relative z-10 text-muted-foreground hover:text-destructive">
                     <Trash2 className="h-3.5 w-3.5" />
                   </span>
                 </DeleteProjectModal>
@@ -48,18 +48,18 @@ export function ProjectCard({ projects, canDelete = true }: ProjectCardProps) {
 
             {/* First prompt preview */}
             {project.firstPrompt && (
-              <p className="mb-3 line-clamp-2 text-[12px] leading-relaxed text-white/30">
+              <p className="mb-3 line-clamp-2 text-[12px] leading-relaxed text-muted-foreground">
                 {project.firstPrompt}
               </p>
             )}
 
             {/* Meta */}
-            <div className="mt-auto flex items-center gap-3 pt-2 border-t border-white/4">
-              <span className="flex items-center gap-1 text-[11px] text-white/25">
+            <div className="mt-auto flex items-center gap-3 pt-2 border-t border-border">
+              <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
                 <MessageSquare className="h-3 w-3" />
                 {msgCount} message{msgCount !== 1 ? "s" : ""}
               </span>
-              <span className="text-[11px] text-white/20">{timeAgo}</span>
+              <span className="text-[11px] text-muted-foreground">{timeAgo}</span>
             </div>
           </div>
         );

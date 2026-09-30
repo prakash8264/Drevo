@@ -820,7 +820,7 @@ export function WorkspaceClient({
       </div>
 
       {/* Workspace — visible only on md+ screens */}
-      <div className="hidden md:flex h-[calc(100vh-3.5rem)] overflow-hidden bg-[#0a0a0a]">
+      <div className="hidden md:flex h-[calc(100vh-3.5rem)] overflow-hidden bg-background">
         {!focusMode && (
           <ChatPanel
             isImproving={isImproving}
@@ -851,7 +851,7 @@ export function WorkspaceClient({
             onPointerDown={handleDividerPointerDown}
             onPointerMove={handleDividerPointerMove}
             onPointerUp={handleDividerPointerUp}
-            className="w-1.5 shrink-0 cursor-col-resize bg-white/6 transition-colors hover:bg-violet-500/40 active:bg-violet-500/60 touch-none"
+            className="w-1.5 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-violet-500/40 active:bg-violet-500/60 touch-none"
           />
         )}
         <CodePanel

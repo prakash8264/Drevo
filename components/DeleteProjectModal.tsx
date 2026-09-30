@@ -48,12 +48,12 @@ export function DeleteProjectModal({
   return (
     <Dialog>
       <DialogTrigger className="cursor-pointer">{children}</DialogTrigger>
-      <DialogContent className="border-white/8 bg-[#111111] text-white sm:max-w-sm">
+      <DialogContent className="border-border bg-popover text-popover-foreground sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle className="text-sm font-semibold text-white/90">
+          <DialogTitle className="text-sm font-semibold text-foreground">
             Delete project?
           </DialogTitle>
-          <DialogDescription className="text-xs text-white/35">
+          <DialogDescription className="text-xs text-muted-foreground">
             &ldquo;{project.title ?? "Untitled project"}&rdquo; will be
             permanently deleted. This cannot be undone.
           </DialogDescription>
@@ -61,7 +61,7 @@ export function DeleteProjectModal({
 
         <DialogFooter className="gap-2">
           <DialogClose>
-            <span className="text-xs text-white/40 hover:text-white/70 pr-2">
+            <span className="text-xs text-muted-foreground hover:text-foreground pr-2">
               Cancel
             </span>
           </DialogClose>

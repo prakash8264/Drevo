@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useAuth, SignInButton } from "@clerk/nextjs";
 import { CheckoutButton } from "@clerk/nextjs/experimental";
 import { ArrowRight, Check } from "lucide-react";
@@ -24,15 +25,44 @@ interface PricingModalProps {
   // the ACTIVE Clerk org (for="organization") — the switcher must keep the
   // Clerk active org and Prisma activeOrganizationId in sync. The has()
   // fallback is display-only for orgs not yet webhook-synced.
+  // Only the org OWNER can buy: pass orgRole from the server header when
+  // available; otherwise the modal resolves it via /api/orgs/members.
   orgPlan?: string | null;
+  orgRole?: string | null;
 }
 
 export function PricingModal({
   children,
   reason = "upgrade",
   orgPlan = null,
+  orgRole = null,
 }: PricingModalProps) {
   const { isSignedIn, has } = useAuth();
+  // Server-known role wins when provided (header path); otherwise resolve
+  // the caller's active-org role once when signed in (e.g. ChatPanel).
+  const [fetchedRole, setFetchedRole] = useState<string | null>(null);
+
+  // Fallback for callers without server role context (e.g. ChatPanel):
+  // resolve the caller's role in the active org once when signed in.
+  useEffect(() => {
+    if (!isSignedIn || orgRole) return;
+    let cancelled = false;
+    fetch("/api/orgs/members")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.role) setFetchedRole(d.role);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, orgRole]);
+
+  const resolvedRole = orgRole ?? fetchedRole;
+
+  // Role unknown yet (still resolving): treat paid checkout as unavailable
+  // rather than flashing an Upgrade button to non-owners.
+  const canBuy = resolvedRole === "OWNER";
 
   const title =
     reason === "credits" ? "You're out of credits" : "Upgrade your plan";
@@ -48,9 +78,9 @@ export function PricingModal({
   };
 
   const activePlanKey = orgPlan ?? (isSignedIn
-    ? has?.({ plan: "pro" })
+    ? has?.({ plan: "pro" }) || has?.({ plan: "proorg" })
       ? "pro"
-      : has?.({ plan: "starter" })
+      : has?.({ plan: "starter" }) || has?.({ plan: "starterorg" })
       ? "starter"
       : "free"
     : null);
@@ -58,12 +88,12 @@ export function PricingModal({
   return (
     <Dialog>
       <DialogTrigger className={"cursor-pointer"}>{children}</DialogTrigger>
-      <DialogContent className="border-white/8 bg-[#0f0f0f] p-0 text-white sm:max-w-5xl max-h-[90dvh] overflow-y-auto">
+      <DialogContent className="border-border bg-popover p-0 text-popover-foreground sm:max-w-5xl max-h-[90dvh] overflow-y-auto">
         <DialogHeader className="px-6 pt-6 pb-2">
-          <DialogTitle className="font-serif text-xl tracking-tight text-white/90">
+          <DialogTitle className="font-serif text-xl tracking-tight text-foreground">
             <BrandTitle className="text-4xl">{title}</BrandTitle>
           </DialogTitle>
-          <DialogDescription className="text-sm text-white/35">
+          <DialogDescription className="text-sm text-muted-foreground">
             {description}
           </DialogDescription>
         </DialogHeader>
@@ -84,13 +114,13 @@ export function PricingModal({
                   "relative flex flex-col rounded-2xl border p-5 transition-colors",
                   plan.featured
                     ? "border-violet-500/50 bg-violet-500/4"
-                    : "border-white/12 bg-[#0a0a0a]"
+                    : "border-border bg-background"
                 )}
               >
                 {/* Most popular pill */}
                 {plan.featured && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                    <span className="rounded-full border border-violet-500/20 bg-[#0a0a0a] px-3 py-1 text-[11px] font-medium text-violet-400">
+                    <span className="rounded-full border border-violet-500/20 bg-background px-3 py-1 text-[11px] font-medium text-violet-500">
                       Most popular
                     </span>
                   </div>
@@ -98,7 +128,7 @@ export function PricingModal({
 
                 {/* Plan name + active badge */}
                 <div className="mb-1 flex items-center gap-2">
-                  <p className="text-sm font-semibold text-white/90">
+                  <p className="text-sm font-semibold text-foreground">
                     {plan.label}
                   </p>
                   {isActive && (
@@ -109,7 +139,7 @@ export function PricingModal({
                 </div>
 
                 {/* Description */}
-                <p className="mb-6 text-xs leading-relaxed text-white/35">
+                <p className="mb-6 text-xs leading-relaxed text-muted-foreground">
                   {plan.description}
                 </p>
 
@@ -123,31 +153,31 @@ export function PricingModal({
                     )}
                   </span>
                   {plan.price > 0 && (
-                    <span className="text-sm text-white/30">/mo</span>
+                    <span className="text-sm text-muted-foreground">/mo</span>
                   )}
                 </div>
-                <p className="mb-6 text-xs text-white/25">
+                <p className="mb-6 text-xs text-muted-foreground">
                   {plan.price === 0 ? "Always free" : "Only billed monthly"}
                 </p>
 
                 {/* Feature list */}
-                <div className="mb-8 space-y-3 border-t border-white/6 pt-6">
+                <div className="mb-8 space-y-3 border-t border-border pt-6">
                   {plan.features.map((f) => (
                     <div key={f} className="flex items-center gap-2.5">
                       <div
                         className={cn(
                           "flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
-                          plan.featured ? "bg-violet-500/15" : "bg-white/8"
+                          plan.featured ? "bg-violet-500/15" : "bg-muted"
                         )}
                       >
                         <Check
                           className={cn(
                             "h-2.5 w-2.5",
-                            plan.featured ? "text-violet-400" : "text-white/50"
+                            plan.featured ? "text-violet-500" : "text-muted-foreground"
                           )}
                         />
                       </div>
-                      <span className="text-xs text-white/55">{f}</span>
+                      <span className="text-xs text-muted-foreground">{f}</span>
                     </div>
                   ))}
                 </div>
@@ -157,7 +187,7 @@ export function PricingModal({
                   {isActive ? (
                     <Button
                       disabled
-                      className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-white/10 bg-transparent text-white/60"
+                      className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-border bg-transparent text-muted-foreground"
                       variant="ghost"
                     >
                       ✓ Current plan
@@ -166,7 +196,7 @@ export function PricingModal({
                     isSignedIn ? (
                       <Button
                         disabled
-                        className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-white/10 bg-transparent text-white/60"
+                        className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-border bg-transparent text-muted-foreground"
                         variant="ghost"
                       >
                         Default plan
@@ -174,7 +204,7 @@ export function PricingModal({
                     ) : (
                       <SignInButton mode="modal">
                         <Button
-                          className="w-full rounded-full text-sm font-semibold border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
+                          className="w-full rounded-full text-sm font-semibold border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
                           variant="ghost"
                         >
                           Get started free
@@ -183,33 +213,44 @@ export function PricingModal({
                       </SignInButton>
                     )
                   ) : isSignedIn ? (
-                    <CheckoutButton
-                      planId={plan.planId}
-                      planPeriod="month"
-                      for="organization"
-                      checkoutProps={{
-                        appearance: {
-                          elements: {
-                            drawerRoot: {
-                              zIndex: 2000,
+                    canBuy ? (
+                      <CheckoutButton
+                        planId={plan.planId}
+                        planPeriod="month"
+                        for="organization"
+                        checkoutProps={{
+                          appearance: {
+                            elements: {
+                              drawerRoot: {
+                                zIndex: 2000,
+                              },
                             },
                           },
-                        },
-                      }}
-                    >
+                        }}
+                      >
+                        <Button
+                          className={cn(
+                            "w-full rounded-full text-sm font-semibold transition-all",
+                            plan.featured
+                              ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
+                              : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
+                          )}
+                          variant="ghost"
+                        >
+                          {isDowngrade ? "Downgrade" : "Upgrade"}
+                          <ArrowRight className="h-3.5 w-3.5" />
+                        </Button>
+                      </CheckoutButton>
+                    ) : (
                       <Button
-                        className={cn(
-                          "w-full rounded-full text-sm font-semibold transition-all",
-                          plan.featured
-                            ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
-                            : "border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
-                        )}
+                        disabled
+                        title="Only the organization owner can change the plan"
+                        className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-border bg-transparent text-muted-foreground"
                         variant="ghost"
                       >
-                        {isDowngrade ? "Downgrade" : "Upgrade"}
-                        <ArrowRight className="h-3.5 w-3.5" />
+                        Owner-only
                       </Button>
-                    </CheckoutButton>
+                    )
                   ) : (
                     <SignInButton mode="modal">
                       <Button
@@ -217,7 +258,7 @@ export function PricingModal({
                           "w-full rounded-full text-sm font-semibold transition-all",
                           plan.featured
                             ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
-                            : "border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
+                            : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
                         )}
                         variant="ghost"
                       >

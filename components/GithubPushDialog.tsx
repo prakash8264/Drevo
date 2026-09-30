@@ -307,10 +307,10 @@ export function GithubPushDialog({
         <GithubMark className="h-3.5 w-3.5" />
         GitHub
       </DialogTrigger>
-      <DialogContent className="max-h-[90dvh] overflow-x-hidden overflow-y-auto border-white/8 bg-[#0f0f0f] text-white sm:max-w-lg [&>*]:min-w-0">
+      <DialogContent className="max-h-[90dvh] overflow-x-hidden overflow-y-auto border-border bg-popover text-popover-foreground sm:max-w-lg [&>*]:min-w-0">
         <DialogHeader>
-          <DialogTitle className="text-white/90">Push to GitHub</DialogTitle>
-          <DialogDescription className="text-sm text-white/35">
+          <DialogTitle className="text-foreground">Push to GitHub</DialogTitle>
+          <DialogDescription className="text-sm text-muted-foreground">
             {githubConnected
               ? `Connected as ${githubUsername ?? "your account"}. Create a new repository or push to one of your existing repos.`
               : "Connect your GitHub account, then push this project to a repository."}
@@ -329,21 +329,21 @@ export function GithubPushDialog({
               <GithubMark className="h-4 w-4" />
               Connect with GitHub
             </Button>
-            <p className="text-[11px] leading-relaxed text-white/25">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
               Drevo requests the minimum scope needed to create repositories and push code. The
               token is stored encrypted and never shown in the browser.
             </p>
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-1 rounded-md border border-white/10 bg-white/5 p-1">
+            <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-muted/50 p-1">
               {(["new", "existing"] as const).map((t) => (
                 <button
                   key={t}
                   type="button"
                   onClick={() => handleTabChange(t)}
                   className={`rounded px-3 py-1.5 text-sm transition-colors ${
-                    tab === t ? "bg-white/10 text-white" : "text-white/40 hover:text-white/70"
+                    tab === t ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   {t === "new" ? "New repository" : "Existing repository"}
@@ -354,19 +354,19 @@ export function GithubPushDialog({
             {tab === "new" ? (
               <>
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-white/60">Repository name</span>
+                  <span className="text-xs font-medium text-muted-foreground">Repository name</span>
                   <input
                     value={repoName}
                     onChange={(e) => setRepoName(e.target.value)}
                     placeholder="my-awesome-app"
                     maxLength={100}
-                    className="h-9 rounded-md border border-white/10 bg-white/5 px-3 text-sm text-white placeholder:text-white/25 focus:border-violet-500/60 focus:outline-none"
+                    className="h-9 rounded-md border border-border bg-muted/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-violet-500/60 focus:outline-none"
                   />
                   {repoNameError && <span className="text-[11px] text-red-400/80">{repoNameError}</span>}
                 </label>
 
                 <div className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-white/60">Visibility</span>
+                  <span className="text-xs font-medium text-muted-foreground">Visibility</span>
                   <div className="grid grid-cols-2 gap-2">
                     {(["private", "public"] as const).map((v) => {
                       const active = (v === "private") === isPrivate;
@@ -377,8 +377,8 @@ export function GithubPushDialog({
                           onClick={() => setIsPrivate(v === "private")}
                           className={`rounded-md border px-3 py-2 text-left text-sm capitalize transition-colors ${
                             active
-                              ? "border-violet-500/60 bg-violet-500/15 text-white"
-                              : "border-white/10 bg-white/5 text-white/50 hover:text-white/80"
+                              ? "border-violet-500/60 bg-violet-500/15 text-foreground"
+                              : "border-border bg-muted/50 text-muted-foreground hover:text-foreground"
                           }`}
                         >
                           {v}
@@ -394,20 +394,20 @@ export function GithubPushDialog({
             ) : (
               <>
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-white/60">Repository</span>
+                  <span className="text-xs font-medium text-muted-foreground">Repository</span>
                   <input
                     value={search}
                     onChange={(e) => handleSearchChange(e.target.value)}
                     placeholder="Search your repositories…"
-                    className="h-9 rounded-md border border-white/10 bg-white/5 px-3 text-sm text-white placeholder:text-white/25 focus:border-violet-500/60 focus:outline-none"
+                    className="h-9 rounded-md border border-border bg-muted/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-violet-500/60 focus:outline-none"
                   />
                 </label>
 
-                <div className="max-h-44 overflow-y-auto rounded-md border border-white/10">
+                <div className="max-h-44 overflow-y-auto rounded-md border border-border">
                   {reposLoading && repos === null ? (
-                    <p className="px-3 py-4 text-center text-xs text-white/30">Loading…</p>
+                    <p className="px-3 py-4 text-center text-xs text-muted-foreground">Loading…</p>
                   ) : repos !== null && repos.length === 0 ? (
-                    <p className="px-3 py-4 text-center text-xs text-white/30">
+                    <p className="px-3 py-4 text-center text-xs text-muted-foreground">
                       No repositories found.
                     </p>
                   ) : (
@@ -418,29 +418,29 @@ export function GithubPushDialog({
                         onClick={() => handleSelectRepo(r.fullName)}
                         className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
                           selectedRepo === r.fullName
-                            ? "bg-violet-500/15 text-white"
-                            : "text-white/60 hover:bg-white/5 hover:text-white/90"
+                            ? "bg-violet-500/15 text-foreground"
+                            : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
                         }`}
                       >
                         <span className="min-w-0 flex-1 truncate">{r.fullName}</span>
-                        <span className="shrink-0 rounded-sm bg-white/10 px-1 text-[10px] leading-4 text-white/50">
+                        <span className="shrink-0 rounded-sm bg-muted px-1 text-[10px] leading-4 text-muted-foreground">
                           {r.private ? "Private" : "Public"}
                         </span>
                       </button>
                     ))
                   )}
                   {reposLoading && repos !== null && (
-                    <p className="px-3 py-1 text-center text-[11px] text-white/25">Updating…</p>
+                    <p className="px-3 py-1 text-center text-[11px] text-muted-foreground">Updating…</p>
                   )}
                 </div>
 
                 <label className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-white/60">Branch</span>
+                  <span className="text-xs font-medium text-muted-foreground">Branch</span>
                   <select
                     value={selectedBranch}
                     onChange={(e) => setSelectedBranch(e.target.value)}
                     disabled={!selectedRepo || branchesLoading}
-                    className="h-9 rounded-md border border-white/10 bg-white/5 px-2 text-sm text-white focus:border-violet-500/60 focus:outline-none disabled:opacity-40 [&>option]:bg-[#0f0f0f]"
+                    className="h-9 rounded-md border border-border bg-muted/50 px-2 text-sm text-foreground focus:border-violet-500/60 focus:outline-none disabled:opacity-40 [&>option]:bg-popover"
                   >
                     {!selectedRepo ? (
                       <option value="">Select a repository first</option>
@@ -461,12 +461,12 @@ export function GithubPushDialog({
             )}
 
             <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium text-white/60">Commit message</span>
+              <span className="text-xs font-medium text-muted-foreground">Commit message</span>
               <input
                 value={commitMessage}
                 onChange={(e) => setCommitMessage(e.target.value)}
                 maxLength={500}
-                className="h-9 rounded-md border border-white/10 bg-white/5 px-3 text-sm text-white placeholder:text-white/25 focus:border-violet-500/60 focus:outline-none"
+                className="h-9 rounded-md border border-border bg-muted/50 px-3 text-sm text-foreground placeholder:text-muted-foreground focus:border-violet-500/60 focus:outline-none"
               />
             </label>
 
@@ -534,7 +534,7 @@ export function GithubPushDialog({
             <button
               onClick={handleDisconnect}
               disabled={isDisconnecting}
-              className="self-start text-[11px] text-white/25 hover:text-white/60 disabled:opacity-40"
+              className="self-start text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
             >
               {isDisconnecting ? "Disconnecting…" : "Disconnect GitHub"}
             </button>

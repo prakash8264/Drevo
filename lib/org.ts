@@ -1,4 +1,5 @@
 import { auth } from "@clerk/nextjs/server";
+import { cache } from "react";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/prisma";
 import { PLANS } from "@/lib/constants";
@@ -124,7 +125,7 @@ export async function ensurePersonalOrganization(userId: string) {
 }
 
 /** Resolve the caller's active org; repairs stale pointers. Redirects if none. */
-export async function getActiveOrganization(): Promise<ActiveOrg> {
+export const getActiveOrganization = cache(async (): Promise<ActiveOrg> => {
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
@@ -168,7 +169,7 @@ export async function getActiveOrganization(): Promise<ActiveOrg> {
     membership: { id: pick.id, role: pick.role },
     role: pick.role,
   };
-}
+});
 
 /** Membership of the caller in the org that owns a workspace. Null if none. */
 export async function getMembershipForOrganization(organizationId: string) {

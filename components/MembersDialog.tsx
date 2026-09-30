@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Users } from "lucide-react";
 import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -29,6 +30,13 @@ export function MembersDialog() {
   const [email, setEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"MEMBER" | "ADMIN">("MEMBER");
   const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<{
+    memberId: string;
+    isSelf: boolean;
+    name: string;
+    email: string;
+  } | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   const load = async () => {
     try {
@@ -40,10 +48,6 @@ export function MembersDialog() {
       setOrgId(d.organizationId ?? null);
     } catch {}
   };
-
-  useEffect(() => {
-    if (open) load();
-  }, [open ]);
 
   const canManage = myRole === "OWNER" || myRole === "ADMIN";
 
@@ -120,41 +124,53 @@ export function MembersDialog() {
     await load();
   };
 
-  const handleRemove = async (memberId: string, isSelf: boolean) => {
-    const res = await fetch("/api/orgs/members/remove", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ memberId }),
-    });
-    const d = await res.json().catch(() => null);
-    if (!res.ok) {
-      toast.error(d?.message ?? "Could not remove member.");
-      return;
-    }
-    if (d?.selfRemoved || isSelf) {
-      setOpen(false);
+  const doRemove = async () => {
+    if (!confirm || removing) return;
+    setRemoving(true);
+    try {
+      const res = await fetch("/api/orgs/members/remove", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memberId: confirm.memberId }),
+      });
+      const d = await res.json().catch(() => null);
+      if (!res.ok) {
+        toast.error(d?.message ?? "Could not remove member.");
+        return;
+      }
+      const wasSelf = confirm.isSelf;
+      setConfirm(null);
+      if (d?.selfRemoved || wasSelf) {
+        setOpen(false);
+        router.refresh();
+        return;
+      }
+      await load();
       router.refresh();
-      return;
+    } finally {
+      setRemoving(false);
     }
-    await load();
-    router.refresh();
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <>
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      setOpen(nextOpen);
+      if (nextOpen) void load();
+    }}>
       <DialogTrigger className="cursor-pointer">
-        <span className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white/90" title="Organization members">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground" title="Organization members">
           <Users className="h-3.5 w-3.5" />
         </span>
       </DialogTrigger>
-      <DialogContent className="border-white/8 bg-[#111111] text-white sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center justify-between text-sm font-semibold text-white/90">
+      <DialogContent className="border-border bg-popover text-popover-foreground sm:max-w-md">
+        <DialogHeader className="pr-10">
+          <DialogTitle className="flex items-center justify-between gap-3 text-sm font-semibold text-foreground">
             <span>Organization members</span>
             <button
               onClick={handleSync}
               disabled={busy}
-              className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] text-white/50 hover:bg-white/10 hover:text-white/80 disabled:opacity-40"
+              className="shrink-0 rounded-full border border-border px-2.5 py-1 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
               title="Pull latest membership from Clerk"
             >
               Sync
@@ -168,12 +184,13 @@ export function MembersDialog() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="teammate@company.com"
-              className="h-8 flex-1 rounded-lg border border-white/10 bg-white/5 px-3 text-xs text-white/80 placeholder:text-white/25 focus:outline-none"
+              aria-label="Invite email address"
+              className="h-8 min-w-0 flex-1 rounded-lg border border-border bg-muted/50 px-3 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-ring"
             />
             <select
               value={inviteRole}
               onChange={(e) => setInviteRole(e.target.value as "MEMBER" | "ADMIN")}
-              className="h-8 rounded-lg border border-white/10 bg-[#1a1a1a] px-2 text-xs text-white/70"
+              className="h-8 rounded-lg border border-border bg-muted px-2 text-xs text-foreground"
               title="Invite as"
             >
               <option value="MEMBER">Member</option>
@@ -187,33 +204,41 @@ export function MembersDialog() {
 
         <div className="max-h-80 space-y-1 overflow-y-auto">
           {members.map((m) => (
-            <div key={m.id} className="flex items-center justify-between gap-2 rounded-lg px-2 py-2 hover:bg-white/5">
+            <div key={m.id} className="flex items-center justify-between gap-2 rounded-lg px-2 py-2 hover:bg-muted/50">
               <div className="min-w-0">
-                <p className="truncate text-xs font-medium text-white/80">
+                <p className="truncate text-xs font-medium text-foreground">
                   {m.user.name || m.user.email}
-                  {m.isSelf && <span className="ml-1 text-white/30">(you)</span>}
+                  {m.isSelf && <span className="ml-1 text-muted-foreground">(you)</span>}
                 </p>
-                <p className="truncate text-[10px] text-white/30">{m.user.email}</p>
+                <p className="truncate text-[10px] text-muted-foreground">{m.user.email}</p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
                 {canManage && !m.isSelf && m.role !== "OWNER" ? (
                   <select
                     value={m.role}
                     onChange={(e) => handleRole(m.id, e.target.value)}
-                    className="h-7 rounded-md border border-white/10 bg-[#1a1a1a] px-1.5 text-[11px] text-white/70"
+                    aria-label={`Role for ${m.user.name || m.user.email}`}
+                    className="h-7 rounded-md border border-border bg-muted px-1.5 text-[11px] text-foreground"
                   >
                     <option value="MEMBER">Member</option>
                     <option value="ADMIN">Admin</option>
                   </select>
                 ) : (
-                  <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-white/50">
+                  <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
                     {m.role}
                   </span>
                 )}
                 {(canManage || m.isSelf) && (
                   <button
-                    onClick={() => handleRemove(m.id, m.isSelf)}
-                    className="rounded-md px-1.5 py-1 text-[11px] text-white/30 hover:bg-white/10 hover:text-red-400"
+                    onClick={() =>
+                      setConfirm({
+                        memberId: m.id,
+                        isSelf: m.isSelf,
+                        name: m.user.name || m.user.email,
+                        email: m.user.email,
+                      })
+                    }
+                    className="rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-destructive"
                     title={m.isSelf ? "Leave organization" : "Remove member"}
                   >
                     {m.isSelf ? "Leave" : "Remove"}
@@ -223,7 +248,7 @@ export function MembersDialog() {
             </div>
           ))}
           {members.length === 0 && (
-            <p className="py-6 text-center text-xs text-white/25">No members found.</p>
+            <p className="py-6 text-center text-xs text-muted-foreground">No members found.</p>
           )}
         </div>
 
@@ -239,5 +264,44 @@ export function MembersDialog() {
         )}
       </DialogContent>
     </Dialog>
+    <Dialog
+      open={confirm !== null}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && !removing) setConfirm(null);
+      }}
+    >
+      <DialogContent className="border-border bg-popover text-popover-foreground sm:max-w-sm">
+        <DialogHeader className="pr-10">
+          <DialogTitle className="text-sm font-semibold text-foreground">
+            {confirm?.isSelf ? "Leave organization?" : "Remove member?"}
+          </DialogTitle>
+          <DialogDescription className="text-xs text-muted-foreground">
+            {confirm?.isSelf
+              ? "You will lose access to this organization's projects."
+              : `${confirm?.name} (${confirm?.email}) will lose access to this organization's projects.`}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex justify-end gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setConfirm(null)}
+            disabled={removing}
+            className="h-8 rounded-full px-4 text-xs"
+          >
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            onClick={doRemove}
+            disabled={removing}
+            className="h-8 rounded-full bg-red-500/90 px-4 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+          >
+            {removing ? "Removing…" : confirm?.isSelf ? "Leave" : "Remove"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }

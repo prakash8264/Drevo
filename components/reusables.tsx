@@ -1,5 +1,5 @@
 export const GrayTitle = ({ children }: { children: React.ReactNode }) => (
-  <span className="text-white/90">{children}</span>
+  <span className="text-foreground">{children}</span>
 );
 
 export const BrandTitle = ({

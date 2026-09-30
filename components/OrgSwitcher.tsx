@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRef, useState, useTransition } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { useClerk } from "@clerk/nextjs";
-import { ChevronsUpDown, Check } from "lucide-react";
+import { ChevronsUpDown, Check, Loader2, Plus } from "lucide-react";
+import { toast } from "sonner";
 
 interface OrgItem {
   id: string;
@@ -14,88 +15,175 @@ interface OrgItem {
   clerkOrgId: string | null;
 }
 
-export function OrgSwitcher({ currentName }: { currentName: string | null }) {
+export function OrgSwitcher({ orgs, activeOrganizationId }: {
+  orgs: OrgItem[];
+  activeOrganizationId: string | null;
+}) {
   const router = useRouter();
+  const pathname = usePathname();
   const { setActive } = useClerk();
-  const [orgs, setOrgs] = useState<OrgItem[]>([]);
   const [open, setOpen] = useState(false);
-  const [switching, setSwitching] = useState(false);
+  const [pendingName, setPendingName] = useState("");
+  const [switching, startTransition] = useTransition();
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [createBusy, setCreateBusy] = useState(false);
+  const inFlight = useRef(false);
+  const current = orgs.find((org) => org.id === activeOrganizationId);
 
-  useEffect(() => {
-    fetch("/api/orgs")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d?.orgs) setOrgs(d.orgs);
-      })
-      .catch(() => {});
-  }, []);
+  const handleSwitch = (org: OrgItem) => {
+    if (inFlight.current || switching) return;
+    setOpen(false);
+    if (org.id === activeOrganizationId) return;
+    inFlight.current = true;
+    setPendingName(org.name);
+    startTransition(async () => {
+      let persisted = false;
+      try {
+        const response = await fetch("/api/orgs/switch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ organizationId: org.id }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.message || "Could not switch organization.");
+        persisted = true;
+        await setActive({ organization: result.clerkOrgId ?? null });
+        // Clerk's Next.js provider refreshes the router after setActive.
+        // A second refresh here duplicates the server render and DB reads.
+        // A project editor belongs to its original org; leave it on a switch.
+        if (pathname === "/workspace") router.push("/projects");
+      } catch (error) {
+        // Roll back the app pointer if Clerk activation failed, so billing and
+        // project authorization don't silently use different organizations.
+        if (persisted && activeOrganizationId) {
+          try {
+            const rollback = await fetch("/api/orgs/switch", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ organizationId: activeOrganizationId }),
+            });
+            if (!rollback.ok) throw new Error("Rollback failed");
+          } catch {
+            toast.error("Organization state could not be restored. Reload before continuing.");
+            router.refresh();
+          }
+        }
+        toast.error(error instanceof Error ? error.message : "Could not switch organization.");
+      } finally {
+        inFlight.current = false;
+      }
+    });
+  };
 
-  if (orgs.length <= 1) {
-    return currentName ? (
-      <span className="max-w-40 truncate text-[13px] font-medium text-white/60">
-        {currentName}
-      </span>
-    ) : null;
-  }
-
-  const handleSwitch = async (id: string) => {
-    setSwitching(true);
+  const handleCreate = async () => {
+    const name = newName.trim();
+    if (!name || createBusy) return;
+    setCreateBusy(true);
     try {
-      const res = await fetch("/api/orgs/switch", {
+      const response = await fetch("/api/orgs/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ organizationId: id }),
+        body: JSON.stringify({ name }),
       });
-      if (!res.ok) return;
-      const d = (await res.json().catch(() => null)) as {
-        clerkOrgId?: string | null;
-      } | null;
-      // Keep Clerk's active org in lockstep so org checkout bills correctly.
-      if (d?.clerkOrgId) {
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.message ?? "Could not create organization.");
+      if (result?.clerkOrgId) {
         try {
-          await setActive({ organization: d.clerkOrgId });
+          await setActive({ organization: result.clerkOrgId });
         } catch {
           // Org not linked in Clerk yet — Prisma pointer still switched.
         }
       }
       setOpen(false);
-      router.refresh();
+      setCreating(false);
+      setNewName("");
+      toast.success(`Created ${name}.`);
+      // New orgs start empty; don't strand the user in another org's editor.
+      // setActive already refreshes the route on success; otherwise refresh,
+      // unless we are navigating away from the workspace editor.
+      if (pathname === "/workspace") router.push("/projects");
+      else if (!result?.clerkOrgId) router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not create organization.");
     } finally {
-      setSwitching(false);
+      setCreateBusy(false);
     }
   };
 
   return (
-    <div className="relative">
+    <div className="relative" onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+    }} onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}>
       <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex max-w-44 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/70 hover:bg-white/10"
+        disabled={switching}
+        aria-expanded={open}
+        aria-controls="organization-options"
+        aria-busy={switching}
+        onClick={() => setOpen((value) => !value)}
+        className="flex max-w-36 items-center gap-1.5 rounded-full border border-border bg-muted/50 px-3 py-1.5 text-xs text-foreground hover:bg-muted disabled:cursor-wait sm:max-w-48"
       >
-        <span className="truncate">{currentName ?? "Organization"}</span>
-        <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-60" />
+        <span className="truncate" role="status">{switching ? `Switching to ${pendingName}…` : current?.name ?? "Organization"}</span>
+        {switching ? <Loader2 className="h-3 w-3 shrink-0 animate-spin" /> : <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-60" />}
       </button>
       {open && (
-        <div className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-white/10 bg-[#111] shadow-xl">
-          {orgs.map((o) => (
-            <button
-              key={o.id}
-              disabled={switching}
-              onClick={() => handleSwitch(o.id)}
-              className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-white/5"
-            >
-              <span>
-                <span className="block truncate text-xs font-medium text-white/80">
-                  {o.name}
-                </span>
-                <span className="block text-[10px] text-white/30">
-                  {o.role} · {o.credits} credits
-                </span>
+        <div id="organization-options" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-border bg-popover shadow-xl">
+          {orgs.map((org) => (
+            <button key={org.id} disabled={switching} onClick={() => handleSwitch(org)}
+              aria-current={org.id === activeOrganizationId ? "true" : undefined}
+              className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-muted focus-visible:bg-muted">
+              <span className="min-w-0">
+                <span className="block truncate text-xs font-medium text-foreground">{org.name}</span>
+                <span className="block text-[10px] text-muted-foreground">{org.role} · {org.credits} credits</span>
               </span>
-              {o.name === currentName && (
-                <Check className="h-3.5 w-3.5 text-violet-400" />
-              )}
+              {org.id === activeOrganizationId && <Check className="h-3.5 w-3.5 shrink-0 text-violet-500" />}
             </button>
           ))}
+          <div className="border-t border-border p-2">
+            {creating ? (
+              <div className="space-y-2 px-1 py-1">
+                <input
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void handleCreate();
+                  }}
+                  placeholder="Organization name"
+                  maxLength={60}
+                  aria-label="New organization name"
+                  className="h-8 w-full rounded-lg border border-border bg-muted/50 px-2.5 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-ring"
+                />
+                <div className="flex justify-end gap-1.5">
+                  <button
+                    onClick={() => {
+                      setCreating(false);
+                      setNewName("");
+                    }}
+                    disabled={createBusy}
+                    className="rounded-full px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void handleCreate()}
+                    disabled={createBusy || !newName.trim()}
+                    className="rounded-full bg-violet-500 px-3 py-1 text-[11px] font-semibold text-white hover:bg-violet-400 disabled:opacity-40"
+                  >
+                    {createBusy ? "Creating…" : "Create"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setCreating(true)}
+                disabled={switching}
+                className="flex w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                New organization
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

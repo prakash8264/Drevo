@@ -3,6 +3,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useTheme } from "next-themes";
 import {
   SandpackProvider,
   SandpackLayout,
@@ -290,7 +291,7 @@ function SandpackInner({
       className="flex h-full flex-col gap-0"
     >
       {/* Tabs + Actions bar */}
-      <div className="flex items-center justify-between border-b border-white/6 px-2">
+      <div className="flex items-center justify-between border-b border-border px-2">
         <TabsList
           variant="line"
           className="h-auto gap-0 rounded-none bg-transparent p-0"
@@ -311,25 +312,25 @@ function SandpackInner({
             <button
               onClick={() => setShowHistory((v) => !v)}
               title="Version history"
-              className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs text-white/60 transition-colors hover:bg-white/6 hover:text-white/90"
+              className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               <History className="h-3.5 w-3.5" />
               {versions.length > 0 && (
-                <span className="rounded-sm bg-white/10 px-1 text-[10px] leading-4">
+                <span className="rounded-sm bg-muted px-1 text-[10px] leading-4">
                   {versions.length}
                 </span>
               )}
             </button>
 
             {showHistory && (
-              <div className="absolute right-0 top-8 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-[#111111] shadow-2xl shadow-black/60">
-                <div className="flex items-center justify-between border-b border-white/6 px-3 py-2">
-                  <p className="text-xs font-semibold text-white/70">
+              <div className="absolute right-0 top-8 z-30 w-72 overflow-hidden rounded-xl border border-border bg-popover shadow-2xl shadow-black/20">
+                <div className="flex items-center justify-between border-b border-border px-3 py-2">
+                  <p className="text-xs font-semibold text-foreground">
                     Version history
                   </p>
                   <button
                     onClick={() => setShowHistory(false)}
-                    className="rounded p-0.5 text-white/30 hover:bg-white/10 hover:text-white/60"
+                    className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -337,24 +338,24 @@ function SandpackInner({
 
                 <div className="max-h-80 overflow-y-auto p-1.5">
                   {versionsLoading ? (
-                    <p className="px-2.5 py-4 text-center text-xs text-white/30">
+                    <p className="px-2.5 py-4 text-center text-xs text-muted-foreground">
                       Loading…
                     </p>
                   ) : versions.length === 0 ? (
-                    <p className="px-2.5 py-4 text-center text-xs text-white/30">
+                    <p className="px-2.5 py-4 text-center text-xs text-muted-foreground">
                       No versions yet. Each AI edit saves one here.
                     </p>
                   ) : (
                     versions.map((v) => (
                       <div
                         key={v.id}
-                        className="rounded-lg px-2.5 py-2 hover:bg-white/5"
+                        className="rounded-lg px-2.5 py-2 hover:bg-muted/50"
                       >
-                        <p className="line-clamp-2 text-xs leading-relaxed text-white/75">
+                        <p className="line-clamp-2 text-xs leading-relaxed text-foreground">
                           {v.summary ?? "Untitled version"}
                         </p>
                         <div className="mt-1 flex items-center justify-between">
-                          <span className="text-[11px] text-white/30">
+                          <span className="text-[11px] text-muted-foreground">
                             {formatDistanceToNow(new Date(v.createdAt), {
                               addSuffix: true,
                             })}{" "}
@@ -382,7 +383,7 @@ function SandpackInner({
                   )}
                 </div>
 
-                <p className="border-t border-white/6 px-3 py-2 text-[10px] text-white/25">
+                <p className="border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
                   Restoring is free and reversible.
                 </p>
               </div>
@@ -390,18 +391,18 @@ function SandpackInner({
           </div>
 
           {/* ── Device toggle ── */}
-          <div className="flex items-center rounded-md border border-white/10 p-0.5">
+          <div className="flex items-center rounded-md border border-border p-0.5">
             <button
               onClick={() => setDevice("desktop")}
               title="Desktop preview"
-              className={`rounded p-1 transition-colors ${device === "desktop" ? "bg-white/10 text-white/80" : "text-white/30 hover:text-white/60"}`}
+              className={`rounded p-1 transition-colors ${device === "desktop" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
             >
               <Monitor className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={() => setDevice("mobile")}
               title="Mobile preview"
-              className={`rounded p-1 transition-colors ${device === "mobile" ? "bg-white/10 text-white/80" : "text-white/30 hover:text-white/60"}`}
+              className={`rounded p-1 transition-colors ${device === "mobile" ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}
             >
               <Smartphone className="h-3.5 w-3.5" />
             </button>
@@ -411,7 +412,7 @@ function SandpackInner({
           <button
             onClick={onToggleFocusMode}
             title={focusMode ? "Show chat" : "Focus preview"}
-            className="rounded-md p-1.5 text-white/60 transition-colors hover:bg-white/6 hover:text-white/90"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             {focusMode ? (
               <Minimize2 className="h-3.5 w-3.5" />
@@ -466,13 +467,13 @@ function SandpackInner({
       {/* Content area */}
       <div className="relative flex-1 overflow-hidden h-full">
         {(isGenerating || isImproving) && !fileData && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-6 bg-[#0a0a0a]/85 backdrop-blur-sm">
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-6 bg-background/85 backdrop-blur-sm">
             <RingLoader color="#a78bfa" size={64} speedMultiplier={0.8} />
             <div className="flex flex-col items-center gap-1.5">
-              <p className="text-sm font-medium text-white/60">
+              <p className="text-sm font-medium text-muted-foreground">
                 {isImproving ? "Applying agent edits…" : currentStepLabel}
               </p>
-              <p className="text-xs text-white/20">
+              <p className="text-xs text-muted-foreground">
                 This usually takes 10–20 seconds
               </p>
             </div>
@@ -481,9 +482,9 @@ function SandpackInner({
 
         {/* Slim non-blocking status bar — edits on an existing app */}
         {(isGenerating || isImproving) && fileData && (
-          <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-2 border-b border-violet-500/20 bg-[#0a0a0a]/90 px-3 py-1.5 backdrop-blur-sm">
+          <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-2 border-b border-violet-500/20 bg-background/90 px-3 py-1.5 backdrop-blur-sm">
             <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />
-            <p className="text-xs text-white/60">
+            <p className="text-xs text-muted-foreground">
               {isImproving ? "Applying agent edits…" : currentStepLabel}
             </p>
           </div>
@@ -505,7 +506,7 @@ function SandpackInner({
             <div
               className={
                 device === "mobile"
-                  ? "mx-auto h-full w-full max-w-[390px] border-x border-white/10"
+                  ? "mx-auto h-full w-full max-w-[390px] border-x border-border"
                   : "h-full w-full"
               }
             >
@@ -591,6 +592,7 @@ export function CodePanel({
   onPushed,
   onGithubConnectionChange,
 }: CodePanelProps) {
+  const { resolvedTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<ActiveTab>("preview");
   const [device, setDevice] = useState<PreviewDevice>("desktop");
 
@@ -614,7 +616,7 @@ export function CodePanel({
       <SandpackProvider
         key={filePathKey}
         template="react"
-        theme="dark"
+        theme={resolvedTheme === "light" ? "light" : "dark"}
         files={files}
         customSetup={{ dependencies }}
         options={{

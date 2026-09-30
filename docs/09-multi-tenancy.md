@@ -29,9 +29,13 @@ and plan. `User` is identity + per-user GitHub token only.
    `GET /api/orgs` + `POST /api/orgs/switch`.
 6. GitHub OAuth stays per-user; MEMBERs push with their own token.
 7. Member management: list/add-by-email/role/remove under
-   `/api/orgs/members/*`; sole-OWNER demote/remove blocked (409);
+   `/api/orgs/members/*`; removals and self-leave ask for confirmation
+   first; sole-OWNER demote/remove blocked (409);
    no self role-changes; ADMINs can't touch OWNERs.
     Clerk sends organization invitation emails for new and existing users.
+   Create orgs from the switcher's New organization row
+   (`POST /api/orgs/create`, caller becomes OWNER, Prisma-first +
+   Clerk-second like personal provisioning).
 8. Delete org: OWNER-only, others-removed-first (409 otherwise), cascade
    wipes workspaces/versions, active pointers repaired.
 9. Billing: org plan is source of truth; Clerk `has({plan})` /
@@ -99,3 +103,27 @@ and plan. `User` is identity + per-user GitHub token only.
 - Checkout: both buttons `for="organization"` (bills active Clerk org);
   `OrgSwitcher` moves Clerk active org + Prisma pointer together via
   `setActive`.
+- Org plans: Starter org plan `cplan_3K2DXlsyW4SPI7QFY7WGnwgTvxe`
+  (dashboard Key `starterorg`, $20/mo, 50 credits), Pro org plan
+  `cplan_3K2J6Vgaiww60XSxqKHGcSwGvGa` (dashboard Key `proorg`, 150 credits).
+  `toDrevoPlan` maps the Clerk slugs `starterorg`/`proorg` → Drevo plans;
+  the header passes the synced `Organization.plan` into the pricing modal so
+  the Active badge does not depend on user-plan `has()` checks.
+- Billing access: only the org OWNER sees paid checkout buttons (header,
+  landing, and modal fallback via `/api/orgs/members` role). ADMIN/MEMBER
+  get a disabled Owner-only button. Free stays the default with no checkout.
+
+## Organization switching performance
+
+- `checkUser` uses the session identity and one Prisma read for established users.
+  Clerk profile fetching and personal-org provisioning are only needed for new
+  users or repairing missing context. Membership reconciliation runs through
+  invitation completion, webhooks, or explicit Sync, not every page render.
+- The header passes its membership list directly to the switcher, avoiding an
+  extra `/api/orgs` request. Active-org resolution is cached within each server
+  render only, never across users or requests.
+- Switching requires one membership lookup (including the Clerk org ID) and
+  one active-pointer update. Clerk `setActive` refreshes the Next.js route;
+  the switcher must not trigger a second refresh on success.
+- Run `node scripts/test-org-switch.cjs` for query-budget, authorization and
+  failed-activation rollback checks.

@@ -22,38 +22,24 @@ export async function POST(request: NextRequest) {
   if (!parsed.success)
     return NextResponse.json({ message: "organizationId required" }, { status: 400 });
 
-  const user = await db.user.findUnique({
-    where: { clerkId },
-    select: { id: true },
-  });
-  if (!user)
-    return NextResponse.json({ message: "User not found" }, { status: 404 });
-
   // Never trust client org id: verify membership first.
-  const membership = await db.organizationMember.findUnique({
+  const membership = await db.organizationMember.findFirst({
     where: {
-      organizationId_userId: {
-        organizationId: parsed.data.organizationId,
-        userId: user.id,
-      },
+      organizationId: parsed.data.organizationId,
+      user: { clerkId },
     },
-    select: { id: true },
+    select: { userId: true, organization: { select: { clerkOrgId: true } } },
   });
   if (!membership)
     return NextResponse.json({ message: "Organization not found" }, { status: 404 });
 
   await db.user.update({
-    where: { id: user.id },
+    where: { id: membership.userId },
     data: { activeOrganizationId: parsed.data.organizationId },
   });
 
   // Clerk active org must move together with the Prisma pointer, otherwise
   // for="organization" checkout bills the wrong org. The client applies this
   // via setActive({ organization }).
-  const org = await db.organization.findUnique({
-    where: { id: parsed.data.organizationId },
-    select: { clerkOrgId: true },
-  });
-
-  return NextResponse.json({ ok: true, clerkOrgId: org?.clerkOrgId ?? null });
+  return NextResponse.json({ ok: true, clerkOrgId: membership.organization.clerkOrgId });
 }

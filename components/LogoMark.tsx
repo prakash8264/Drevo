@@ -15,12 +15,12 @@ export function LogoMark({ size = "md", className }: LogoMarkProps) {
       role="img"
       aria-label="Drevo"
       className={cn(
-        "flex shrink-0 items-center justify-center border border-white/10 bg-white/10",
+        "flex shrink-0 items-center justify-center border border-border bg-muted",
         box,
         className
       )}
     >
-      <Zap className={cn("text-white", icon)} fill="currentColor" />
+      <Zap className={cn("text-foreground", icon)} fill="currentColor" />
     </div>
   );
 }

@@ -177,11 +177,11 @@ export function ChatPanel({
 
   return (
     <div
-      className="flex h-full shrink-0 flex-col bg-[#0d0d0d]"
+      className="flex h-full shrink-0 flex-col bg-card"
       style={{ width: width ?? 320 }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-white/6 px-2 py-3">
+      <div className="flex items-center justify-between border-b border-border px-2 py-3">
         <BrandTitle>{appTitle}</BrandTitle>
         <PricingModal reason={noCredits ? "credits" : "upgrade"}>
           <span
@@ -189,7 +189,7 @@ export function ChatPanel({
               "rounded-full px-2 py-0.5 text-[11px] transition-colors",
               noCredits
                 ? "bg-red-500/15 text-red-400/80 hover:bg-red-500/25"
-                : "bg-white/6 text-white/30 hover:bg-white/10 hover:text-white/50"
+                : "bg-muted text-muted-foreground hover:bg-accent hover:text-foreground"
             )}
           >
             {noCredits
@@ -206,7 +206,7 @@ export function ChatPanel({
       >
         {messages.length === 0 && !isGenerating && (
           <div className="flex h-full items-center justify-center">
-            <p className="text-center text-xs text-white/20">
+            <p className="text-center text-xs text-muted-foreground">
               Describe what you want to build…
             </p>
           </div>
@@ -232,13 +232,13 @@ export function ChatPanel({
                         />
                       )}
                       {editingIndex === i ? (
-                        <div className="rounded-2xl rounded-br-sm border border-violet-500/30 bg-white/10 p-2">
+                        <div className="rounded-2xl rounded-br-sm border border-violet-500/30 bg-muted p-2">
                           <textarea
                             autoFocus
                             value={editDraft}
                             onChange={(e) => setEditDraft(e.target.value)}
                             rows={3}
-                            className="w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed text-white/80 focus:outline-none"
+                            className="w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed text-foreground focus:outline-none"
                           />
                           <div className="flex justify-end gap-1.5 px-1 pb-1">
                             <button
@@ -246,22 +246,22 @@ export function ChatPanel({
                                 setEditingIndex(null);
                                 setEditDraft("");
                               }}
-                              className="rounded-md px-2 py-1 text-[11px] text-white/40 hover:bg-white/10 hover:text-white/70"
+                              className="rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
                             >
                               Cancel
                             </button>
                             <button
                               onClick={() => handleEditSave(i)}
                               disabled={!editDraft.trim() || isBusy}
-                              className="rounded-md bg-white px-2 py-1 text-[11px] font-semibold text-black hover:bg-white/90 disabled:opacity-40"
+                              className="rounded-md bg-primary px-2 py-1 text-[11px] font-semibold text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
                             >
                               Resend
                             </button>
                           </div>
                         </div>
                       ) : (
-                        <div className="rounded-2xl rounded-br-sm bg-white/10 px-3.5 py-2.5">
-                          <p className="text-[13px] leading-relaxed text-white/80 wrap-break-word">
+                        <div className="rounded-2xl rounded-br-sm bg-muted px-3.5 py-2.5">
+                          <p className="text-[13px] leading-relaxed text-foreground wrap-break-word">
                             {msg.content}
                           </p>
                         </div>
@@ -274,7 +274,7 @@ export function ChatPanel({
                               setEditingIndex(i);
                               setEditDraft(msg.content);
                             }}
-                            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-white/30 hover:bg-white/10 hover:text-white/60"
+                            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
                           >
                             <Pencil className="h-3 w-3" />
                             Edit
@@ -290,7 +290,7 @@ export function ChatPanel({
                         className="mt-0.5 h-6 w-6 shrink-0 rounded-full"
                       />
                     ) : (
-                      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10 text-[10px] font-semibold text-white/50">
+                      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
                         {user?.firstName?.[0] ?? "U"}
                       </div>
                     )}
@@ -298,12 +298,12 @@ export function ChatPanel({
                 ) : (
                   <div className="group flex items-start gap-2">
                     <LogoMark size="sm" className="mt-0.5" />
-                    <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm bg-white/5 px-3.5 py-2.5">
+                    <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm bg-muted/50 px-3.5 py-2.5">
                       {isLiveStream && !msg.content ? (
                         // Empty placeholder — show thinking indicator
                         <div className="flex items-center gap-2">
                           <Wand2 className="h-3 w-3 shrink-0 text-violet-400/60 animate-pulse" />
-                          <span className="text-[12px] text-white/30 animate-pulse">
+                          <span className="text-[12px] text-muted-foreground animate-pulse">
                             Thinking…
                           </span>
                         </div>
@@ -317,14 +317,14 @@ export function ChatPanel({
                               Reasoning
                             </span>
                           </div>
-                          <p className="text-[12px] leading-relaxed text-white/35 wrap-break-word">
+                          <p className="text-[12px] leading-relaxed text-muted-foreground wrap-break-word">
                             {msg.content}
                             <span className="ml-0.5 inline-block h-3 w-0.5 animate-[blink_1s_ease-in-out_infinite] bg-violet-400/60 align-middle" />
                           </p>
                         </div>
                       ) : (
                         // Normal completed assistant message
-                        <div className="prose prose-sm prose-invert max-w-none wrap-break-word text-[13px] leading-relaxed text-white/70 [&_code]:rounded [&_code]:bg-white/10 [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-violet-300/80 [&_code]:text-xs [&_code]:break-all [&_li]:my-0.5 [&_p]:my-1 [&_pre]:overflow-x-auto! [&_pre]:whitespace-pre-wrap! [&_ul]:my-1">
+                        <div className="prose prose-sm dark:prose-invert max-w-none wrap-break-word text-[13px] leading-relaxed text-foreground/80 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-violet-500 [&_code]:text-xs [&_code]:break-all [&_li]:my-0.5 [&_p]:my-1 [&_pre]:overflow-x-auto! [&_pre]:whitespace-pre-wrap! [&_ul]:my-1">
                           <ReactMarkdown>{msg.content}</ReactMarkdown>
                         </div>
                       )}
@@ -333,7 +333,7 @@ export function ChatPanel({
                           <button
                             title="Copy response"
                             onClick={() => handleCopy(msg.content)}
-                            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-white/30 hover:bg-white/10 hover:text-white/60"
+                            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
                           >
                             <Copy className="h-3 w-3" />
                             Copy
@@ -343,7 +343,7 @@ export function ChatPanel({
                               title="Regenerate response (1 credit)"
                               disabled={noCredits}
                               onClick={onRegenerate}
-                              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-white/30 hover:bg-white/10 hover:text-white/60 disabled:opacity-40"
+                              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
                             >
                               <RotateCcw className="h-3 w-3" />
                               Regenerate
@@ -362,7 +362,7 @@ export function ChatPanel({
           {isGenerating && (
             <div className="flex items-start gap-2">
               <LogoMark size="sm" className="mt-0.5" />
-              <div className="rounded-2xl rounded-tl-sm bg-white/5 px-3.5 py-3">
+              <div className="rounded-2xl rounded-tl-sm bg-muted/50 px-3.5 py-3">
                 <div className="space-y-2">
                   {statusLog.map((step, i) => (
                     <div key={i} className="flex items-center gap-2.5">
@@ -371,7 +371,7 @@ export function ChatPanel({
                           <Loader2 className="h-3 w-3 animate-spin text-violet-400/80" />
                         ) : (
                           <svg
-                            className="h-3 w-3 text-white/25"
+                            className="h-3 w-3 text-muted-foreground"
                             viewBox="0 0 12 12"
                             fill="none"
                           >
@@ -389,8 +389,8 @@ export function ChatPanel({
                         className={cn(
                           "text-[12px] transition-colors duration-300",
                           step.status === "running"
-                            ? "text-white/75"
-                            : "text-white/25"
+                            ? "text-foreground"
+                            : "text-muted-foreground"
                         )}
                       >
                         {step.label}
@@ -411,7 +411,7 @@ export function ChatPanel({
             You&apos;ve used all your credits
           </p>
           <PricingModal reason="credits">
-            <span className="inline-flex h-8 items-center gap-1.5 rounded-full text-xs active:scale-95 cursor-pointer bg-white text-black px-3">
+            <span className="inline-flex h-8 items-center gap-1.5 rounded-full text-xs active:scale-95 cursor-pointer bg-primary text-primary-foreground px-3">
               <Sparkles className="h-3 w-3" />
               Upgrade plan
             </span>
@@ -420,7 +420,7 @@ export function ChatPanel({
       )}
 
       {/* Input */}
-      <div className="border-t border-white/6 p-3">
+      <div className="border-t border-border p-3">
         {pendingImageUrl && (
           <div className="relative mb-2 w-fit">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -440,12 +440,12 @@ export function ChatPanel({
 
         <div
           className={cn(
-            "rounded-xl border bg-white/4 transition-colors",
+            "rounded-xl border bg-muted/40 transition-colors",
             isGenerating || isImproving
-              ? "border-white/4"
+              ? "border-border"
               : noCredits
-              ? "border-white/4 opacity-60"
-              : "border-white/8 hover:border-white/12"
+              ? "border-border opacity-60"
+              : "border-border hover:border-ring"
           )}
         >
           <textarea
@@ -464,7 +464,7 @@ export function ChatPanel({
                 : "Ask AI to modify…"
             }
             rows={1}
-            className="w-full resize-none bg-transparent px-3.5 pb-2 pt-3 text-[13px] text-white/80 placeholder:text-white/20 focus:outline-none"
+            className="w-full resize-none bg-transparent px-3.5 pb-2 pt-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none"
             style={{ maxHeight: 160 }}
           />
 
@@ -474,7 +474,7 @@ export function ChatPanel({
               size="icon"
               onClick={() => fileRef.current?.click()}
               disabled={isGenerating || isImproving || isUploading || noCredits}
-              className="h-7 w-7 rounded-lg text-white/25 hover:bg-white/6 hover:text-white/50 disabled:opacity-40"
+              className="h-7 w-7 rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
             >
               {isUploading ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -496,7 +496,7 @@ export function ChatPanel({
             {workspaceId && (
               <div className="flex flex-col items-center gap-1">
                 <div
-                  className="flex items-center rounded-md border border-white/10 p-0.5"
+                  className="flex items-center rounded-md border border-border p-0.5"
                   title="Model used for follow-up edits"
                 >
                   {(["gemini", "qwen", "atria"] as const).map((m) => (
@@ -514,8 +514,8 @@ export function ChatPanel({
                       }
                       className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
                         editModel === m
-                          ? "bg-white/10 text-white/80"
-                          : "text-white/30 hover:text-white/60"
+                          ? "bg-muted text-foreground"
+                          : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
                       {m === "gemini" ? "Gemini" : m === "qwen" ? "Qwen" : "Atria"}
@@ -524,14 +524,14 @@ export function ChatPanel({
                 </div>
                 {editModel === "atria" && (
                   <span
-                    className="max-w-44 text-center text-[10px] leading-snug text-white/25"
+                    className="max-w-44 text-center text-[10px] leading-snug text-muted-foreground"
                     title="Atria-Dawn-Preview accepts text only: attached screenshots travel as URL text the model cannot view"
                   >
                     Text-only model — screenshots are sent as links it can&apos;t view.
                   </span>
                 )}
                 {editModel === "qwen" && (
-                  <span className="text-[10px] text-white/25">
+                  <span className="text-[10px] text-muted-foreground">
                     {qwenBudget === null
                       ? "Checking free quota…"
                       : !qwenBudget.configured
@@ -551,7 +551,7 @@ export function ChatPanel({
               <Button
                 size="icon"
                 onClick={onStop}
-                className="h-7 w-7 rounded-lg bg-white/10 text-white/60 hover:bg-white/20 hover:text-white active:scale-95 transition-all"
+                className="h-7 w-7 rounded-lg bg-muted text-muted-foreground hover:bg-accent hover:text-foreground active:scale-95 transition-all"
               >
                 <Square className="h-3 w-3 fill-current" />
               </Button>
@@ -563,8 +563,8 @@ export function ChatPanel({
                 className={cn(
                   "h-7 w-7 rounded-lg transition-all",
                   canSubmit
-                    ? "bg-white text-black hover:bg-white/90 active:scale-95"
-                    : "bg-white/8 text-white/20 shadow-none"
+                    ? "bg-primary text-primary-foreground hover:bg-primary/90 active:scale-95"
+                    : "bg-muted text-muted-foreground shadow-none"
                 )}
               >
                 <ArrowUp className="h-3.5 w-3.5" />
@@ -573,7 +573,7 @@ export function ChatPanel({
           </div>
         </div>
 
-        <p className="mt-1.5 text-center text-[10px] text-white/15">
+        <p className="mt-1.5 text-center text-[10px] text-muted-foreground">
           {isGenerating || isImproving
             ? "Click ■ to stop generation"
             : "⏎ to send · Shift+⏎ for new line"}

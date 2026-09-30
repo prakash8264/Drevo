@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth, SignInButton } from "@clerk/nextjs";
+import { useTheme } from "next-themes";
 import { CheckoutButton } from "@clerk/nextjs/experimental";
 import { ArrowRight, Zap, ChevronRight, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -21,6 +22,7 @@ import {
 import { LogoMark } from "@/components/LogoMark";
 
 export default function LandingPage() {
+  const { resolvedTheme } = useTheme();
   const { isSignedIn, has } = useAuth();
   const router = useRouter();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -28,6 +30,25 @@ export default function LandingPage() {
   const [prompt, setPrompt] = useState("");
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [isFocused, setIsFocused] = useState(false);
+  // OWNER-only billing: resolve the caller's role in the active org so
+  // non-owners never get an org checkout button on the landing page.
+  const [activeRole, setActiveRole] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isSignedIn) return;
+    let cancelled = false;
+    fetch("/api/orgs/members")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.role) setActiveRole(d.role);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn]);
+
+  const canBuyPlan = activeRole === "OWNER";
 
   useEffect(() => {
     if (isFocused || prompt) return;
@@ -62,11 +83,11 @@ export default function LandingPage() {
   };
 
   return (
-    <main className="min-h-screen bg-[#0a0a0a] selection:bg-white/20">
+    <main className="min-h-screen bg-background selection:bg-foreground/20">
       {/* ── HERO ──────────────────────────────────────────────────────────── */}
       <section className="relative flex flex-col items-center overflow-hidden px-4 pb-24 pt-40 text-center">
         <HoleBackground
-          strokeColor="rgba(255,255,255,0.05)" // blur
+          strokeColor={resolvedTheme === "light" ? "rgba(0,0,0,0.08)" : "rgba(255,255,255,0.05)"}
           className="absolute inset-0 h-full w-full"
           style={{
             maskImage:
@@ -87,7 +108,7 @@ export default function LandingPage() {
           <BrandTitle>Develop it.</BrandTitle>
         </h1>
 
-        <p className="mx-auto mt-6 max-w-xl text-balance text-base leading-relaxed text-white/40 z-10">
+        <p className="mx-auto mt-6 max-w-xl text-balance text-base leading-relaxed text-muted-foreground z-10">
           Describe what you want to build. Drevo writes the code, picks the
           packages, and renders a live preview all inside your browser.
         </p>
@@ -95,10 +116,10 @@ export default function LandingPage() {
         <div className="relative mx-auto mt-12 w-full max-w-2xl">
           <div
             className={cn(
-              "rounded-2xl border bg-[#111111] duration-200",
+              "rounded-2xl border bg-card duration-200",
               isFocused
-                ? "border-white/20 ring-1 ring-white/8"
-                : "border-white/8"
+                ? "border-ring ring-1 ring-ring/20"
+                : "border-border"
             )}
           >
             <textarea
@@ -110,12 +131,12 @@ export default function LandingPage() {
               onBlur={() => setIsFocused(false)}
               placeholder={PLACEHOLDERS[placeholderIndex]}
               rows={1}
-              className="w-full resize-none bg-transparent px-5 pb-4 pt-5 text-sm placeholder:text-white/20 focus:outline-none sm:text-base"
+              className="w-full resize-none bg-transparent px-5 pb-4 pt-5 text-sm placeholder:text-muted-foreground focus:outline-none sm:text-base"
               style={{ minHeight: 56, maxHeight: 200 }}
             />
 
-            <div className="flex items-center justify-between border-t border-white/6 px-4 py-2.5">
-              <span className="text-xs text-white/20">
+            <div className="flex items-center justify-between border-t border-border px-4 py-2.5">
+              <span className="text-xs text-muted-foreground">
                 Press ⏎ to generate · Shift+⏎ for new line
               </span>
 
@@ -131,7 +152,7 @@ export default function LandingPage() {
                 </Button>
               ) : (
                 <SignInButton mode="modal">
-                  <Button className="h-8 rounded-full bg-white px-5 font-semibold">
+                  <Button className="h-8 rounded-full px-5 font-semibold">
                     Generate
                     <ArrowRight className="h-3.5 w-3.5" />
                   </Button>
@@ -145,7 +166,7 @@ export default function LandingPage() {
               <button
                 key={s}
                 onClick={() => handleSuggestion(s)}
-                className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-xs text-white/40 hover:border-white/15 hover:bg-white/8 hover:text-white/70"
+                className="rounded-full border border-border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 {s}
               </button>
@@ -153,14 +174,14 @@ export default function LandingPage() {
           </div>
         </div>
 
-        <p className="mt-10 text-xs text-white/20">
+        <p className="mt-10 text-xs text-muted-foreground">
           No credit card required · 10 free generations on sign up
         </p>
       </section>
 
       {/* BROWSER MOCKUP */}
       <section className="px-4 pb-32">
-        <div className="mx-auto max-w-5xl overflow-hidden rounded-2xl border border-white/8 bg-[#0f0f0f] shadow-2xl shadow-black/60">
+        <div className="dark mx-auto max-w-5xl overflow-hidden rounded-2xl border border-white/8 bg-[#0f0f0f] text-white shadow-2xl shadow-black/20">
           <div className="flex items-center gap-2 border-b border-white/6 px-4 py-3">
             <div className="flex gap-1.5">
               {Array.from({ length: 3 }).map((_, i) => (
@@ -282,17 +303,17 @@ export default function LandingPage() {
           <SectionHeading gray="From prompt" brand="to production." />
         </div>
 
-        <div className="mx-auto grid max-w-5xl grid-cols-1 gap-px overflow-hidden rounded-2xl border border-white/6 bg-white/6 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mx-auto grid max-w-5xl grid-cols-1 gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-2 lg:grid-cols-3">
           {FEATURES.map(({ icon: Icon, label, desc }) => (
             <div
               key={label}
-              className="group bg-[#0a0a0a] p-7 hover:bg-[#0f0f0f]"
+              className="group bg-background p-7 hover:bg-card"
             >
-              <div className="mb-4 flex h-9 w-9 items-center justify-center rounded-lg border border-white/8 bg-white/4 group-hover:border-white/15 group-hover:bg-white/8">
-                <Icon className="h-4 w-4 text-white/60 group-hover:text-violet-400/70" />
+              <div className="mb-4 flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-muted/40 group-hover:bg-muted">
+                <Icon className="h-4 w-4 text-muted-foreground group-hover:text-violet-500" />
               </div>
               <p className="mb-2 text-sm font-semibold">{label}</p>
-              <p className="text-sm leading-relaxed text-white/40">{desc}</p>
+              <p className="text-sm leading-relaxed text-muted-foreground">{desc}</p>
             </div>
           ))}
         </div>
@@ -309,14 +330,14 @@ export default function LandingPage() {
           {STEPS.map((step, i) => (
             <div key={step.number} className="flex gap-6">
               <div className="flex flex-col items-center">
-                <div className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/4">
-                  <span className="font-mono text-xs font-semibold text-white/50">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full border border-border bg-muted/40">
+                  <span className="font-mono text-xs font-semibold text-muted-foreground">
                     {step.number}
                   </span>
                 </div>
 
                 {i < STEPS.length - 1 && (
-                  <div className="mt-2 h-full w-px bg-white/6" />
+                  <div className="mt-2 h-full w-px bg-border" />
                 )}
               </div>
 
@@ -325,7 +346,7 @@ export default function LandingPage() {
                   {step.label}
                 </p>
 
-                <p className="text-sm leading-relaxed text-white/40">
+                <p className="text-sm leading-relaxed text-muted-foreground">
                   {step.desc}
                 </p>
               </div>
@@ -340,7 +361,7 @@ export default function LandingPage() {
           <SectionLabel>Simple pricing</SectionLabel>
           <SectionHeading gray="Start free," brand="scale when ready." />
 
-          <p className="mx-auto mt-4 max-w-sm text-sm text-white/35">
+          <p className="mx-auto mt-4 max-w-sm text-sm text-muted-foreground">
             No credit card required. Upgrade or downgrade anytime.
           </p>
         </div>
@@ -353,9 +374,9 @@ export default function LandingPage() {
               pro: 2,
             };
             const activePlanKey = isSignedIn
-              ? has?.({ plan: "pro" })
+              ? has?.({ plan: "pro" }) || has?.({ plan: "proorg" })
                 ? "pro"
-                : has?.({ plan: "starter" })
+                : has?.({ plan: "starter" }) || has?.({ plan: "starterorg" })
                 ? "starter"
                 : "free"
               : null;
@@ -374,13 +395,13 @@ export default function LandingPage() {
                   "relative flex flex-col rounded-2xl border p-7 transition-colors",
                   plan.featured
                     ? "border-violet-500/25 bg-violet-500/4"
-                    : "border-white/8 bg-[#0f0f0f]"
+                    : "border-border bg-card"
                 )}
               >
                 {/* Most popular pill */}
                 {plan.featured && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                    <span className="rounded-full border border-violet-500/20 bg-[#0a0a0a] px-3 py-1 text-[11px] font-medium text-violet-400">
+                    <span className="rounded-full border border-violet-500/20 bg-background px-3 py-1 text-[11px] font-medium text-violet-500">
                       Most popular
                     </span>
                   </div>
@@ -388,7 +409,7 @@ export default function LandingPage() {
 
                 {/* Plan name + active badge */}
                 <div className="mb-1 flex items-center gap-2">
-                  <p className="text-sm font-semibold text-white/90">
+                  <p className="text-sm font-semibold text-foreground">
                     {plan.label}
                   </p>
                   {isActive && (
@@ -399,7 +420,7 @@ export default function LandingPage() {
                 </div>
 
                 {/* Description */}
-                <p className="mb-6 text-xs leading-relaxed text-white/35">
+                <p className="mb-6 text-xs leading-relaxed text-muted-foreground">
                   {plan.description}
                 </p>
 
@@ -413,31 +434,31 @@ export default function LandingPage() {
                     )}
                   </span>
                   {plan.price > 0 && (
-                    <span className="text-sm text-white/30">/mo</span>
+                    <span className="text-sm text-muted-foreground">/mo</span>
                   )}
                 </div>
-                <p className="mb-6 text-xs text-white/25">
+                <p className="mb-6 text-xs text-muted-foreground">
                   {plan.price === 0 ? "Always free" : "Only billed monthly"}
                 </p>
 
                 {/* Feature list */}
-                <div className="mb-8 space-y-3 border-t border-white/6 pt-6">
+                <div className="mb-8 space-y-3 border-t border-border pt-6">
                   {plan.features.map((f) => (
                     <div key={f} className="flex items-center gap-2.5">
                       <div
                         className={cn(
                           "flex h-4 w-4 shrink-0 items-center justify-center rounded-full",
-                          plan.featured ? "bg-violet-500/15" : "bg-white/8"
+                          plan.featured ? "bg-violet-500/15" : "bg-muted"
                         )}
                       >
                         <Check
                           className={cn(
                             "h-2.5 w-2.5",
-                            plan.featured ? "text-violet-400" : "text-white/50"
+                            plan.featured ? "text-violet-500" : "text-muted-foreground"
                           )}
                         />
                       </div>
-                      <span className="text-xs text-white/55">{f}</span>
+                      <span className="text-xs text-muted-foreground">{f}</span>
                     </div>
                   ))}
                 </div>
@@ -447,7 +468,7 @@ export default function LandingPage() {
                   {isActive ? (
                     <Button
                       disabled
-                      className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-white/10 bg-transparent text-white/60"
+                      className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-border bg-transparent text-muted-foreground"
                       variant="ghost"
                     >
                       ✓ Current plan
@@ -456,7 +477,7 @@ export default function LandingPage() {
                     isSignedIn ? (
                       <Button
                         disabled
-                        className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-white/10 bg-transparent text-white/60"
+                        className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-border bg-transparent text-muted-foreground"
                         variant="ghost"
                       >
                         Default plan
@@ -464,7 +485,7 @@ export default function LandingPage() {
                     ) : (
                       <SignInButton mode="modal">
                         <Button
-                          className="w-full rounded-full text-sm font-semibold border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
+                          className="w-full rounded-full text-sm font-semibold border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
                           variant="ghost"
                         >
                           Get started free
@@ -473,33 +494,44 @@ export default function LandingPage() {
                       </SignInButton>
                     )
                   ) : isSignedIn ? (
-                    <CheckoutButton
-                      planId={plan.planId}
-                      planPeriod="month"
-                      for="organization"
-                      checkoutProps={{
-                        appearance: {
-                          elements: {
-                            drawerRoot: {
-                              zIndex: 2000,
+                    canBuyPlan ? (
+                      <CheckoutButton
+                        planId={plan.planId}
+                        planPeriod="month"
+                        for="organization"
+                        checkoutProps={{
+                          appearance: {
+                            elements: {
+                              drawerRoot: {
+                                zIndex: 2000,
+                              },
                             },
                           },
-                        },
-                      }}
-                    >
+                        }}
+                      >
+                        <Button
+                          className={cn(
+                            "w-full rounded-full text-sm font-semibold transition-all",
+                            plan.featured
+                              ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
+                              : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
+                          )}
+                          variant="ghost"
+                        >
+                          {isDowngrade ? "Downgrade" : "Get started"}
+                          <ArrowRight className="h-3.5 w-3.5" />
+                        </Button>
+                      </CheckoutButton>
+                    ) : (
                       <Button
-                        className={cn(
-                          "w-full rounded-full text-sm font-semibold transition-all",
-                          plan.featured
-                            ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
-                            : "border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
-                        )}
+                        disabled
+                        title="Only the organization owner can change the plan"
+                        className="w-full rounded-full text-sm font-semibold opacity-50 cursor-not-allowed border border-border bg-transparent text-muted-foreground"
                         variant="ghost"
                       >
-                        {isDowngrade ? "Downgrade" : "Get started"}
-                        <ArrowRight className="h-3.5 w-3.5" />
+                        Owner-only
                       </Button>
-                    </CheckoutButton>
+                    )
                   ) : (
                     <SignInButton mode="modal">
                       <Button
@@ -507,7 +539,7 @@ export default function LandingPage() {
                           "w-full rounded-full text-sm font-semibold transition-all",
                           plan.featured
                             ? "bg-violet-500 text-white hover:bg-violet-400 active:scale-95"
-                            : "border border-white/10 bg-transparent text-white/60 hover:bg-white/6 hover:text-white/90"
+                            : "border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
                         )}
                         variant="ghost"
                       >
@@ -524,7 +556,7 @@ export default function LandingPage() {
       </section>
 
       {/* ── CTA ───────────────────────────────────────────────────────────── */}
-      <section className="relative mx-auto mb-32 max-w-5xl overflow-hidden rounded-2xl border border-white/8 px-10 py-24 text-center">
+      <section className="relative mx-auto mb-32 max-w-5xl overflow-hidden rounded-2xl border border-border px-10 py-24 text-center">
         <HoleBackground
           strokeColor="rgba(255,255,255,0.05)" // blur
           numberOfLines={36}
@@ -541,7 +573,7 @@ export default function LandingPage() {
 
         <SectionHeading gray="Start building," brand="for free." />
 
-        <p className="mb-8 text-sm leading-relaxed text-white/40">
+        <p className="mb-8 text-sm leading-relaxed text-muted-foreground">
           Get 10 free generations on sign up. No credit card required.
           <br />
           Upgrade when you&apos;re ready.
@@ -550,7 +582,7 @@ export default function LandingPage() {
         <SignInButton mode="modal">
           <Button
             size="lg"
-            className="relative h-11 rounded-full bg-white px-8"
+            className="relative h-11 rounded-full px-8"
           >
             Get started free
             <ChevronRight className="h-4 w-4" />
@@ -558,40 +590,40 @@ export default function LandingPage() {
         </SignInButton>
       </section>
 
-      <footer className="relative z-10 border-t border-white/7 px-6 py-12">
+      <footer className="relative z-10 border-t border-border px-6 py-12">
         <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-8 sm:flex-row sm:items-start">
           <div className="flex flex-col items-center gap-3 sm:items-start">
             <Link href="/" className="flex items-center gap-2 select-none" aria-label="Drevo home">
               <LogoMark size="md" />
             </Link>
-            <p className="text-xs text-white/30">
+            <p className="text-xs text-muted-foreground">
               Dream it. Develop it.
             </p>
           </div>
 
-          <div className="flex items-center gap-6 text-[13px] text-white/40">
+          <div className="flex items-center gap-6 text-[13px] text-muted-foreground">
             <Link
               href="/projects"
-              className="transition-colors hover:text-white/80"
+              className="transition-colors hover:text-foreground"
             >
               Projects
             </Link>
             <Link
               href="#pricing"
-              className="transition-colors hover:text-white/80"
+              className="transition-colors hover:text-foreground"
             >
               Pricing
             </Link>
             <Link
               href="/workspace"
-              className="transition-colors hover:text-white/80"
+              className="transition-colors hover:text-foreground"
             >
               Workspace
             </Link>
           </div>
         </div>
 
-        <p className="mx-auto mt-10 max-w-5xl text-center text-xs text-white/20 sm:text-left">
+        <p className="mx-auto mt-10 max-w-5xl text-center text-xs text-muted-foreground sm:text-left">
           © 2026 Drevo. All rights reserved.
         </p>
       </footer>
