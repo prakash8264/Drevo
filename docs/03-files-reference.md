@@ -31,9 +31,8 @@ changes are in [10](./10-audit-findings-and-fixes.md).
 | `app/api/improve/errors.ts` | Nested provider-error matching, retry hints, quota/overload payloads, `MaxIterationsError` |
 | `app/api/improve/models/index.ts` | Model allowlist and configuration-error responses |
 | `app/api/improve/models/gemini.ts` | Gemini provider and default model |
-| `app/api/improve/models/nemotron.ts` | OpenRouter NVIDIA Nemotron 3 Ultra provider, exact `:free` model |
+| `app/api/improve/models/glm.ts` | NVIDIA OpenAI-compatible GLM-5.3-Flash provider, exact `z-ai/glm-5.3-flash` model, server-only key and model-specific request settings |
 | `app/api/improve/models/atria.ts` | Text-only Atria Chat Completions provider |
-| `app/api/models/openrouter-budget/route.ts` | Server-only OpenRouter account spending-limit lookup in USD; not daily free-model request quota or Drevo credit authority |
 
 ## Organization and webhook routes
 

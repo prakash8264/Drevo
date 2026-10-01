@@ -20,7 +20,7 @@ flowchart TD
 
 `WorkspaceClient` owns the router and state/refs. Initial prompts always use
 Gemini; follow-ups, regenerate, edited-message resubmission, and preview fixes
-use Gemini/Nemotron/Atria as selected. There is no separate privileged Pro editing
+use Gemini/GLM/Atria as selected. There is no separate privileged Pro editing
 path; all members/plans can edit when shared credits are available.
 
 ## 2. Providers and dependency pairing
@@ -29,30 +29,43 @@ path; all members/plans can edit when shared credits are available.
 |---|---|---|
 | Initial generation | `@google/genai`, `gemini-3.5-flash` | `GEMINI_API_KEY` |
 | Gemini edits | AI SDK Google provider, `gemini-3.5-flash` | `GEMINI_API_KEY` |
-| Nemotron edits | OpenRouter, `nvidia/nemotron-3-ultra-550b-a55b:free` (NVIDIA: Nemotron 3 Ultra, free) | `OPENROUTER_API_KEY` |
+| GLM edits | NVIDIA OpenAI-compatible Chat Completions, `z-ai/glm-5.3-flash`, `https://integrate.api.nvidia.com/v1` | `NVIDIA_API_KEY` |
 | Atria edits | OpenAI-compatible Chat Completions, `Atria-Dawn-Preview`, `https://api.atria-asi.ai/v1` | `ATRIA_API_KEY` |
 
 `GEMINI_FALLBACK_MODEL` optionally provides a Gemini-only fallback after overload
-exhaustion. It is not silently used instead of Nemotron/Atria. Missing editing keys
+exhaustion. It is not silently used instead of GLM/Atria. Missing editing keys
 return `*_NOT_CONFIGURED` before a provider call; arbitrary client model names
 fail validation.
 
-Nemotron replaces the former Qwen slot; clients now send `model: "nemotron"`.
-OpenRouter's public catalog lists the exact free model with `tools` and
-`tool_choice` support. This is catalog verification, not proof of successful
-generation with a deployed key. Its `:free` suffix is intentional; there is no
-paid-model or cross-provider fallback. Successful saved edits still cost one
-**Drevo** organization credit, independent of OpenRouter's free token pricing.
+GLM replaces the former Nemotron/OpenRouter slot; clients now send `model: "glm"`.
+NVIDIA's public model list contains the exact ID, and its
+[model card](https://build.nvidia.com/z-ai/glm-5-3-flash) documents function
+calling, reasoning, and OpenAI-compatible tool calls. Its
+[API reference](https://docs.api.nvidia.com/nim/reference/z-ai-glm-5-3-flash-infer)
+documents streaming Chat Completions. Catalog/docs verification and mocked SDK
+tests do not prove live generation with a user's key. No cross-provider fallback
+was added. NVIDIA trial terms/account limits apply; successful saved edits still
+cost one **Drevo** organization credit regardless of provider token pricing.
 
-The Nemotron toggle's optional `/api/models/openrouter-budget` display reads
-OpenRouter's account-wide key spending limit in **USD**, not daily free-model
-request counts. Free-model limits still apply and the display never blocks an
-edit. The new key must be set as server-only `OPENROUTER_API_KEY` locally and in
-the relevant Vercel environment; redeploy after changing it. Refresh existing
-browser tabs after deploying the replacement to use the new request model ID.
+The NVIDIA resolver uses the already-installed compatible provider. Its request
+adapter sets `max_tokens: 16384` if the SDK does not supply a cap (NVIDIA's
+documented default of 1,024 can truncate full-file tool arguments),
+`reasoning_effort: "low"` for interactive latency, and
+`chat_template_kwargs: { clear_thinking: true }`, as recommended for chat by
+the model card. Tools, required tool choice, cancellation, retries, and atomic
+save/history/credits still use the same shared agent path.
+
+The old `/api/models/openrouter-budget` endpoint and USD-budget display were
+removed; those numbers do not describe NVIDIA limits. Fill in the empty
+server-only `NVIDIA_API_KEY` in `.env` and restart local development. Set it in
+the relevant Vercel environment and redeploy for hosted use. Refresh existing
+browser tabs after deploying to use the new request model ID; `"nemotron"` and
+`"qwen"` are rejected rather than silently aliased. An old `OPENROUTER_API_KEY`
+is no longer read. `.env` stays Git-ignored, and no secret is sent to the browser.
 
 Current exact pairing: `ai 7.0.109`, `@ai-sdk/google 3.0.125`,
-`@openrouter/ai-sdk-provider 3.1.0`, `@ai-sdk/openai-compatible 3.0.55`.
+`@ai-sdk/openai-compatible 3.0.55`. The unused OpenRouter dependency was removed;
+no dependency upgrades were needed.
 Do not float SDK/provider majors independently: the earlier model-spec mismatch
 failed every edit before network work. Recheck assignability and build after
 dependency updates; see [06](./06-troubleshooting.md).
@@ -169,6 +182,10 @@ signal, and `maxRetries: 0`. `runAgentWithRetries` owns overload retry behavior:
 - Quota is not blindly retried; nested errors/statuses and `Retry-After` feed
   the appropriate user message. An explicitly classified partial path can
   retain valid changes after some failed runs; see next section.
+- The 240-second model deadline is shared across attempts and Gemini fallback.
+  It aborts only provider work and raises `MaxIterationsError("timeout")` without
+  resetting completed tool updates or waiting for aborted SDK result promises.
+  The separate request signal still has 50 seconds for validation/save/response.
 
 ### Outcome classification
 
@@ -176,7 +193,8 @@ signal, and `maxRetries: 0`. `runAgentWithRetries` owns overload retry behavior:
 |---|---|
 | Completion, no changed paths or deps | Free `done`; fresh org balance; no messages/version/files commit |
 | Completion with valid changes | Shared atomic save; one credit |
-| `MaxIterationsError` with valid retained changes (steps, captured quota, or exhausted overload) | May retain partial work with cause-honest summary; one credit if committed |
+| `MaxIterationsError` with valid retained changes (steps, captured quota, exhausted overload, or model timeout) | May retain partial work with cause-honest summary; one credit if committed |
+| Model timeout without valid changed work | Explicit `AI_TIMEOUT` or validation error; no save/charge |
 | Direct quota error, or classified failure with no retained work | Error, no save/charge |
 | Cancellation before commit, invalid output, stale revision/access, failed save | No commit/charge |
 
@@ -221,7 +239,14 @@ current workspace files remain full JSONB. See [11](./11-text-patch-version-hist
 ## 7. Cancellation and client reconciliation
 
 - Node route budget: 300 seconds; signal timeout: 290 seconds.
-- Signals combine request abort, stream disconnect, and timeout; SDK calls use it.
+- Signals combine request abort, stream disconnect, and hard timeout.
+- Editing SDK calls additionally use the 240-second model deadline. Persistence
+  uses only the request signal, allowing validated partial saves after the model
+  deadline but never after Stop/disconnect/hard abort. Generation still uses its
+  hard request signal; incomplete generated JSON is not saved.
+- Both routes report a hard deadline with an explicit `AI_TIMEOUT` event before
+  closing, unless a `done` event was already emitted. This error asks the user
+  to check server truth; it cannot promise no charge if commit already happened.
 - Package validation/finalization and transaction checkpoints honor cancellation.
 - UI Stop/unmount abort live controllers; duplicate local submits are guarded.
 - `safeEnqueue`/`safeClose` tolerate closed streams and avoid double-close crashes.
@@ -268,4 +293,11 @@ policies; those policies require provider-side verification.
 in-memory PostgreSQL constraint/rollback/migration tests. It covers invalid/empty
 output, revision conflicts, membership loss, insufficient credits, cancellation
 during lookup/save, post-commit pruning, 503 retries, leases, and credit-event
-scope. It makes no live provider generation, purchase, or repository push.
+scope. GLM regression checks cover the exact endpoint/key/model and request
+settings, missing/rejected keys without save/charge, no-ops, rendered selector,
+and update/completion tool calls through the actual SDK with mocked NVIDIA SSE.
+Deadline regressions cover a completed SDK update followed by timeout and a
+single history/files/credit commit with `partial: true`; empty/invalid/stale
+work, Stop/disconnect/hard abort remain unsaved. Both routes report hard
+deadlines without contradicting a previously emitted `done`.
+It makes no live provider generation, purchase, or repository push.

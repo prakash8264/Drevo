@@ -1,12 +1,12 @@
 import type { EditModelId } from "@/types/workspace";
 import type { ResolvedImproveModel } from "./gemini";
 import { resolveGeminiModel, GEMINI_NOT_CONFIGURED } from "./gemini";
-import { resolveNemotronModel, NEMOTRON_NOT_CONFIGURED } from "./nemotron";
+import { resolveGlmModel, GLM_NOT_CONFIGURED } from "./glm";
 import { resolveAtriaModel, ATRIA_NOT_CONFIGURED } from "./atria";
 
 export {
   GEMINI_NOT_CONFIGURED,
-  NEMOTRON_NOT_CONFIGURED,
+  GLM_NOT_CONFIGURED,
   ATRIA_NOT_CONFIGURED,
   resolveGeminiModel,
 };
@@ -20,7 +20,7 @@ export type { ResolvedImproveModel };
 export function resolveImproveModel(
   selection: EditModelId
 ): ResolvedImproveModel {
-  if (selection === "nemotron") return resolveNemotronModel();
+  if (selection === "glm") return resolveGlmModel();
   if (selection === "atria") return resolveAtriaModel();
   return resolveGeminiModel();
 }
@@ -31,11 +31,11 @@ export function notConfiguredResponse(selection: EditModelId): {
   message: string;
   code: string;
 } {
-  if (selection === "nemotron") {
+  if (selection === "glm") {
     return {
       message:
-        "Nemotron edits aren't configured on this server yet. Switch back to Gemini or ask the owner to add an OpenRouter key.",
-      code: NEMOTRON_NOT_CONFIGURED,
+        "GLM-5.3-Flash edits aren't configured on this server yet. Switch back to Gemini or ask the owner to add NVIDIA_API_KEY.",
+      code: GLM_NOT_CONFIGURED,
     };
   }
   if (selection === "atria") {

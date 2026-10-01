@@ -22,7 +22,7 @@ export const GenerateRequestSchema = z.object({
 export const ImproveRequestSchema = z.object({
   workspaceId: Id, revision: z.number().int().min(0), userRequest: z.string().trim().min(1).max(40000),
   imageUrl: z.string().url().max(2000).optional(), messages: Messages.optional(),
-  fileData: FileDataSchema, model: z.enum(["gemini", "nemotron", "atria"]).optional(),
+  fileData: FileDataSchema, model: z.enum(["gemini", "glm", "atria"]).optional(),
 });
 export const GeneratedOutputSchema = FileDataSchema.extend({ assistantMessage: z.string().trim().min(1).max(40000) });
 
@@ -39,6 +39,13 @@ export function aiErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.endsWith("No credits were deducted.")
     ? error.message : "Something went wrong. Please try again. No credits were deducted.";
 }
+
+// A hard deadline can race a committed save. Do not promise a refund when
+// its completion event may have been lost; the client refreshes server truth.
+export const AI_TIMEOUT_RESPONSE = {
+  code: "AI_TIMEOUT",
+  message: "The AI request reached its time limit. Reload to check the saved project before retrying with a smaller request.",
+};
 
 export async function readAiBody(request: Request): Promise<unknown> {
   if (Number(request.headers.get("content-length") ?? 0) > 10_000_000) throw new Error("Request is too large");

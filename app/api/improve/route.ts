@@ -26,7 +26,7 @@ import {
 } from "./agent-prompts";
 import { createFinishRun, diffPaths } from "./agent-finish";
 import { runAgentWithRetries } from "./agent-run";
-import { ImproveRequestSchema, readAiBody, protectAi, acquireAiLease, aiErrorMessage } from "@/lib/ai-request";
+import { ImproveRequestSchema, readAiBody, protectAi, acquireAiLease, aiErrorMessage, AI_TIMEOUT_RESPONSE } from "@/lib/ai-request";
 
 // ─── SSE helper ───────────────────────────────────────────────────────────────
 // Kept local: three lines, used by every enqueue site below.
@@ -49,6 +49,10 @@ export async function POST(request: NextRequest) {
 
   const disconnected = new AbortController();
   const signal = AbortSignal.any([request.signal, disconnected.signal, AbortSignal.timeout(290000)]);
+  // Stop provider work at four minutes, reserving 50s for validation, the
+  // guarded save (15s), history cleanup (15s), and a final SSE response.
+  // User/disconnect/hard aborts still cancel persistence through `signal`.
+  const modelSignal = AbortSignal.any([signal, AbortSignal.timeout(240000)]);
   const body = await readAiBody(request).catch(() => null);
   const input = ImproveRequestSchema.safeParse(body);
   if (!input.success) return Response.json({ message: "Invalid improvement request" }, { status: 400 });
@@ -66,7 +70,7 @@ export async function POST(request: NextRequest) {
 
   // Validation rejects unknown models; an omitted model defaults to Gemini.
   const editModel: EditModelId =
-    requestedModel === "nemotron" || requestedModel === "atria"
+    requestedModel === "glm" || requestedModel === "atria"
       ? requestedModel
       : "gemini";
 
@@ -146,6 +150,7 @@ export async function POST(request: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
+      let completed = false;
       const safeEnqueue = (chunk: string) => {
         if (closed) return;
         try {
@@ -164,8 +169,15 @@ export async function POST(request: NextRequest) {
         }
       };
 
-      // If the client aborts (Stop button / navigation), stop enqueueing.
-      signal.addEventListener("abort", safeClose, { once: true });
+      const onAbort = () => {
+        if (signal.reason?.name === "TimeoutError" && !completed) {
+          console.warn(`[improve:${selected.label}] request deadline reached`);
+          safeEnqueue(sseEvent("error", AI_TIMEOUT_RESPONSE));
+        }
+        safeClose();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
 
       // Accumulate file patches + new deps as the agent calls tools.
       // These exact objects are shared with the tools factory and the
@@ -216,7 +228,10 @@ export async function POST(request: NextRequest) {
           files: patchedFiles,
           dependencies: patchedDependencies,
         }),
-        enqueueDone: (payload) => safeEnqueue(sseEvent("done", payload)),
+        enqueueDone: (payload) => {
+          safeEnqueue(sseEvent("done", payload));
+          completed = true;
+        },
       });
 
       // Which files actually changed vs what the run started with?
@@ -260,7 +275,7 @@ export async function POST(request: NextRequest) {
             instructions: agentInstructions,
             input: agentInput,
             tools,
-            abortSignal: signal,
+            abortSignal: modelSignal,
             resetRunState,
             shouldStop: () => closed || signal.aborted,
             enqueue: (type, payload) => safeEnqueue(sseEvent(type, payload)),
@@ -289,7 +304,7 @@ export async function POST(request: NextRequest) {
               instructions: agentInstructions,
               input: agentInput,
               tools,
-              abortSignal: signal,
+              abortSignal: modelSignal,
               resetRunState,
               shouldStop: () => closed || signal.aborted,
               enqueue: (type, payload) =>
@@ -347,6 +362,7 @@ export async function POST(request: NextRequest) {
               creditsRemaining: currentOrg?.credits ?? orgCredits,
             })
           );
+          completed = true;
           return;
         }
 
@@ -369,9 +385,10 @@ export async function POST(request: NextRequest) {
             )
           );
         } else if (err instanceof MaxIterationsError) {
-          // Run ended without completion. If the agent already completed
-          // file updates, keep them (partial save, 1 credit deducted like a
-          // normal run) so the user can ask to continue instead of starting
+          // Run ended without completion (including the model deadline).
+          // If the agent already completed file updates, keep them (partial
+          // save, 1 credit deducted like a normal run) so the user can ask
+          // to continue instead of starting
           // over. If nothing changed, fall through to the free friendly
           // error. The note names the true cause from err.reason instead of
           // always blaming the step budget.
@@ -391,12 +408,17 @@ export async function POST(request: NextRequest) {
                   ? `I applied part of your request before hitting ${providerShort}'s rate limit. `
                   : err.reason === "overload"
                     ? `I applied part of your request before ${providerShort === "Gemini" ? "the model" : providerShort} became overloaded. `
-                    : "I applied part of your request before running out of steps. ";
+                    : err.reason === "timeout"
+                      ? `I applied part of your request before ${providerShort} reached the time limit. `
+                      : "I applied part of your request before running out of steps. ";
               const partialNote =
                 rateLimitLead +
                 `Updated: ${updatedList}. ` +
                 "Ask me to continue with the rest. If the preview shows errors, that's expected mid-overhaul — ask me to continue or use Fix with AI." +
                 (finalSummary ? `\n\nProgress so far: ${finalSummary}` : "");
+              if (err.reason === "timeout") {
+                safeEnqueue(sseEvent("thinking", { text: "\n\nTime limit reached. Saving completed file updates…" }));
+              }
               await finishRun(partialNote, true);
             } catch (saveErr) {
               console.error("[improve] partial save failed:", saveErr);
@@ -404,7 +426,7 @@ export async function POST(request: NextRequest) {
                 sseEvent("error", {
                   message:
                     aiErrorMessage(saveErr),
-                  code: "MAX_ITERATIONS",
+                  code: err.reason === "timeout" ? "AI_TIMEOUT" : "MAX_ITERATIONS",
                 })
               );
             }
@@ -430,6 +452,11 @@ export async function POST(request: NextRequest) {
                 )
               )
             );
+          } else if (err.reason === "timeout") {
+            safeEnqueue(sseEvent("error", {
+              message: `${providerShort} took too long to finish this edit. Try a smaller request (one section at a time). No credits were deducted.`,
+              code: "AI_TIMEOUT",
+            }));
           } else {
             safeEnqueue(
               sseEvent("error", {
@@ -449,7 +476,7 @@ export async function POST(request: NextRequest) {
         }
       } finally {
         await release();
-        signal.removeEventListener("abort", safeClose);
+        signal.removeEventListener("abort", onAbort);
         safeClose();
       }
     },

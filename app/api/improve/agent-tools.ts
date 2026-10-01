@@ -16,8 +16,8 @@ export function createImproveTools(
   emitFilePatch: (path: string, code: string, reason: string) => void
 ) {
   // Tool 1: update_file — the agent calls this once per file it wants to
-  // change. We immediately emit a file_patch SSE event so Sandpack updates
-  // live in the browser as each file is patched.
+  // change. Emit progress immediately; the client replaces Sandpack files
+  // only after a committed `done`, never from unsaved patches.
   const updateFileTool = tool({
     description:
       "Update or rewrite a file in the React sandbox. Call once per file you need to change.",
@@ -33,7 +33,7 @@ export function createImproveTools(
     }),
     execute: async ({ path, code, reason }) => {
       state.files[path] = { code };
-      // Emit live patch — client applies it to Sandpack immediately
+      // Progress only — this is not a database-save receipt.
       emitFilePatch(path, code, reason);
       return `Updated ${path}: ${reason}`;
     },

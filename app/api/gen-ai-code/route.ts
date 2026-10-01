@@ -4,7 +4,7 @@ import { GoogleGenAI } from "@google/genai";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
 import type { Message, FileData } from "@/types/workspace";
-import { GenerateRequestSchema, GeneratedOutputSchema, readAiBody, protectAi, acquireAiLease, aiErrorMessage, validateApp } from "@/lib/ai-request";
+import { GenerateRequestSchema, GeneratedOutputSchema, readAiBody, protectAi, acquireAiLease, aiErrorMessage, validateApp, AI_TIMEOUT_RESPONSE } from "@/lib/ai-request";
 import { saveAiWorkspace } from "@/lib/workspace-save";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
@@ -269,6 +269,7 @@ export async function POST(request: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
+      let completed = false;
       const safeEnqueue = (chunk: string) => {
         if (closed) return;
         try {
@@ -287,8 +288,15 @@ export async function POST(request: NextRequest) {
         }
       };
 
-      // If the client aborts (Stop button / navigation), stop enqueueing.
-      signal.addEventListener("abort", safeClose, { once: true });
+      const onAbort = () => {
+        if (signal.reason?.name === "TimeoutError" && !completed) {
+          console.warn("[gen-ai-code] request deadline reached");
+          safeEnqueue(sseEvent("error", AI_TIMEOUT_RESPONSE));
+        }
+        safeClose();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
 
       // Sleep that wakes early on client abort (Stop button / navigation).
       const sleepOrAbort = (ms: number) =>
@@ -488,6 +496,7 @@ export async function POST(request: NextRequest) {
             fileData: newFileData,
           })
         );
+        completed = true;
       } catch (err) {
         console.error("[gen-ai-code] stream error:", err);
         if (isQuotaError(err)) {
@@ -503,7 +512,7 @@ export async function POST(request: NextRequest) {
         }
       } finally {
         await release();
-        signal.removeEventListener("abort", safeClose);
+        signal.removeEventListener("abort", onAbort);
         safeClose();
       }
     },

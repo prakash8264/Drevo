@@ -53,16 +53,24 @@ export interface AgentRunArgs {
   enqueue: (type: string, payload: object) => void;
 }
 
-// Runs the tool loop with shed-tolerance: Google/OpenRouter 503s and 429s
+// Runs the tool loop with shed-tolerance: provider 503s and 429s
 // arrive at call time and mid-stream. Overload-shaped failures retry (fresh
 // buffer each time — partial JSON is unusable); quota failures convert
 // straight to honest partial-or-free handling (every attempt burns quota
-// units, so quota never retries). Aborts return null immediately.
+// units, so quota never retries). Client/hard aborts return null; a model
+// deadline enters partial-or-free handling while saving still has time.
 // Resolves { steps, finalText, streamError } for classification, or null.
 // (Return type is inferred so the route's Awaited<ReturnType<…>> keeps
 // working without importing AI SDK step internals.)
 export async function runAgentWithRetries(args: AgentRunArgs) {
+  const checkModelDeadline = () => {
+    if (args.abortSignal.aborted && args.abortSignal.reason?.name === "TimeoutError") {
+      throw new MaxIterationsError("timeout");
+    }
+  };
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (args.shouldStop()) return null;
+    checkModelDeadline();
     args.resetRunState();
     // Declared BEFORE the try (not beside the loop): the catch below reads
     // both, and anything throwing above their declaration — e.g. streamText()
@@ -127,6 +135,9 @@ export async function runAgentWithRetries(args: AgentRunArgs) {
       }
 
       if (args.shouldStop()) return null;
+      // Reserve the request's remaining time for a validated partial save.
+      // Do not wait for SDK promises after an incomplete, aborted step.
+      checkModelDeadline();
       const steps = await result.steps;
       const finalText = await result.text;
       if (streamError !== null && isOverloadedError(streamError)) throw streamError;
@@ -138,6 +149,7 @@ export async function runAgentWithRetries(args: AgentRunArgs) {
         streamErr
       );
       if (args.shouldStop()) return null;
+      checkModelDeadline();
       // Transport-level death (e.g. NoOutputGeneratedError) with a captured
       // error part: the stream, not the budget, killed the run — classify
       // honestly instead of retrying blindly or erroring generic.
@@ -153,8 +165,11 @@ export async function runAgentWithRetries(args: AgentRunArgs) {
       if (
         (await sleepOrAbort(args.abortSignal, backoffMs(attempt))) ===
         "aborted"
-      )
+      ) {
+        if (args.shouldStop()) return null;
+        checkModelDeadline();
         return null;
+      }
     }
   }
   throw new Error("Improve failed");

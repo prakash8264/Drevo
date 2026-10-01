@@ -17,7 +17,7 @@ Start with the [documentation index](./docs/README.md).
 
 ## Main features
 
-- Gemini first-generation output; Gemini, NVIDIA Nemotron 3 Ultra (free), or Atria for follow-up edits.
+- Gemini first-generation output; Gemini, GLM-5.3-Flash via NVIDIA, or Atria for follow-up edits.
 - Sandpack preview and source viewer; AI-assisted runtime-error recovery.
 - Organization-owned projects, subscriptions, and shared credits.
 - Clerk authentication, organization invitations, and organization checkout.
@@ -38,7 +38,13 @@ Start with the [documentation index](./docs/README.md).
 4. Start `npm run dev` and open <http://localhost:3000>.
 5. Configure Clerk invitations, organization plans, and signed webhook delivery
    for your environment. GitHub and the optional editing providers require their
-   own credentials.
+    own credentials.
+
+For GLM edits, fill in the server-only `NVIDIA_API_KEY` in `.env` and restart the
+development server. The model is `z-ai/glm-5.3-flash`, served directly by NVIDIA;
+an OpenRouter key is no longer used. For Vercel, set `NVIDIA_API_KEY` in the
+intended environment, redeploy, and refresh existing browser tabs. NVIDIA trial
+terms/account limits apply; successful saved edits still cost one Drevo credit.
 
 The host application uses Next.js **16.3.8**, React **19.2.8**, Prisma **7.10.0**,
 and PostgreSQL. Production builds use **webpack**, not Turbopack, to avoid the

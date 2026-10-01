@@ -47,12 +47,6 @@ interface ChatPanelProps {
   // Edit-model toggle (follow-up prompts only — first generation is Gemini).
   editModel: EditModelId;
   onEditModelChange: (model: EditModelId) => void;
-  // OpenRouter account spending budget (display-only, refreshed by the parent).
-  openRouterBudget: {
-    configured: boolean;
-    remaining: number | null;
-    limit: number | null;
-  } | null;
 }
 
 export function ChatPanel({
@@ -72,7 +66,6 @@ export function ChatPanel({
   width,
   editModel,
   onEditModelChange,
-  openRouterBudget,
 }: ChatPanelProps) {
   const { user } = useUser();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -499,7 +492,7 @@ export function ChatPanel({
                   className="flex items-center rounded-md border border-border p-0.5"
                   title="Model used for follow-up edits"
                 >
-                  {(["gemini", "nemotron", "atria"] as const).map((m) => (
+                  {(["gemini", "glm", "atria"] as const).map((m) => (
                     <button
                       key={m}
                       type="button"
@@ -508,8 +501,8 @@ export function ChatPanel({
                       title={
                         m === "gemini"
                           ? "Gemini 3.5 Flash (default)"
-                          : m === "nemotron"
-                            ? "NVIDIA: Nemotron 3 Ultra via OpenRouter (free)"
+                          : m === "glm"
+                            ? "GLM-5.3-Flash via NVIDIA API Catalog"
                             : "Atria Dawn Preview via ATRIA ASI"
                       }
                       className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
@@ -518,7 +511,7 @@ export function ChatPanel({
                           : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      {m === "gemini" ? "Gemini" : m === "nemotron" ? "Nemotron" : "Atria"}
+                      {m === "gemini" ? "Gemini" : m === "glm" ? "GLM-5.3 Flash" : "Atria"}
                     </button>
                   ))}
                 </div>
@@ -530,18 +523,12 @@ export function ChatPanel({
                     Text-only model — screenshots are sent as links it can&apos;t view.
                   </span>
                 )}
-                {editModel === "nemotron" && (
+                {editModel === "glm" && (
                   <span
                     className="max-w-52 text-center text-[10px] text-muted-foreground"
-                    title="Account-wide spending budget in USD, not a daily free-model request allowance. OpenRouter free-model limits still apply."
+                    title="Uses the server's NVIDIA_API_KEY. NVIDIA account limits and trial terms apply; successful saved edits still cost one Drevo credit."
                   >
-                    {openRouterBudget === null
-                      ? "Checking OpenRouter budget…"
-                      : !openRouterBudget.configured
-                        ? "Add an OpenRouter key to enable Nemotron."
-                        : openRouterBudget.remaining === null
-                          ? "Nemotron free — OpenRouter limits apply."
-                          : `OpenRouter key budget: $${openRouterBudget.remaining.toFixed(2)} remaining.`}
+                    NVIDIA-hosted model — provider limits apply.
                   </span>
                 )}
               </div>

@@ -16,6 +16,7 @@ The full security/billing audit, root causes, and unresolved items are in
 | Billing Sync 503 during Clerk outage | Fail-closed preservation, not automatic Free. Retry after provider recovery; do not edit balance or replay real payments. |
 | Organization deletion blocked | Other provider/local members or active/unresolved paid item. Remove members, cancel/wait for period end, then retry. |
 | Connection ended before completion confirmed | Done event may have been lost after commit. Refresh/review saved project and balance before retrying. |
+| GLM emits file patches then stops around five minutes | The former shared 290-second abort closed the stream and prevented saving. Editing now stops model work at 240 seconds to allow a validated partial save; a hard deadline sends `AI_TIMEOUT`. Refresh/restart the updated app and try a smaller edit; progress alone is not a save receipt. |
 | GitHub push succeeded but tracking warning | Remote succeeded; local metadata failed. Inspect repo; retrying create can collide with already-created repo. |
 | Old global GitHub link absent on reload | Legacy link isn't safely attributable to a member/target; exact target tracking starts next successful push. |
 | Webhook fails before handler | Check signature secret/raw-body verification and provider logs; exact route is exempt from bot detection, not from signature validation. |
@@ -94,15 +95,22 @@ above the `try`; `maxRetries: 0` so our envelope is the sole retry authority
 `collectErrorText` matching across `errors[]`/`lastError`/cause. Pool limits
 remain (OpenRouter suggests BYOK provider keys to accumulate own limits).
 
-## 14. Qwen toggle answers "not configured" / odd provider errors
-The Qwen name here is historical: the OpenRouter slot now uses NVIDIA Nemotron
-3 Ultra (free), with `NEMOTRON_NOT_CONFIGURED` as its missing-key code.
-Cause: `OPENROUTER_API_KEY` empty (the selected OpenRouter path returns a clean
-free 400 by design), or OpenRouter-side shapes (402
-account-credit, `no endpoints`, gateway errors) mapped into the existing
-quota/overload paths. Fix: add an OpenRouter key (free models cost $0 but
-still require one); check the terminal `[improve:<label>]` attempt lines to
-see which provider failed and how.
+## 14. GLM toggle answers "not configured" / provider errors
+The former Qwen/Nemotron OpenRouter slot now uses `z-ai/glm-5.3-flash` directly
+through NVIDIA. `GLM_NOT_CONFIGURED` means the server's `NVIDIA_API_KEY` is empty;
+the selected path returns a free 400 before streaming or provider work.
+Fill in the key in `.env` and restart local development. In Vercel, configure
+the intended deployment environment and redeploy; refresh existing browser tabs
+to send `model: "glm"`. An old `OPENROUTER_API_KEY` cannot enable this path.
+
+A nonempty but rejected key can fail after `Agent working…`: provider 401/403
+errors still use the existing sanitized generic error. Check sanitized
+`[improve:<label>]` server logs and NVIDIA account/key access; never paste keys
+into logs or chat. NVIDIA rate/account-limit errors map to the existing quota
+path, and overloads use the bounded retry envelope. No-op or failed unsaved work
+does not deduct credits. The former OpenRouter USD-budget display was removed;
+it cannot describe NVIDIA's account limits. Live GLM generation remains
+unverified until a valid key is configured and an edit completes.
 
 ## 16. Spark slot replaced by Atria (was: Responses-only hazards)
 Spark (`muse-spark-1.3-contributor-free`) never shipped — its free tier is
@@ -130,7 +138,7 @@ only then was anything built. Notes:
   headers — honored in quota payloads (body countdown → hint → header).
 - Original toggle: Gemini/Qwen/Atria; no budget microcopy for Atria (per-minute
   headers only, surfaced via toasts). Qwen was subsequently replaced by
-  Nemotron; the Atria integration remains unchanged.
+  Nemotron, then GLM via NVIDIA; the Atria integration remains unchanged.
 
 ## 17. MiMo-V2.6-Flash Free is caller-gated like Spark — parked
 Live probe (minimal chat-completions call, valid Zen key, 2026-09-24):
@@ -141,7 +149,8 @@ policy, not endpoint-specific, and no request shape avoids it. Per plan:
 no code was added for MiMo (swap stopped at the probe); the Spark toggle
   slot was subsequently replaced by Atria (see #18). Legitimate alternatives
 unchanged: paid Zen models (no caller gate), Meta-direct Contributor tier,
-or more OpenRouter `:free` models through the OpenRouter editing plumbing.
+or OpenRouter `:free` models via a separately reviewed integration (the current
+editing slot no longer uses OpenRouter).
 
 ## 13. Partial note blames "steps" when quota/overload killed the run
 Cause: mid-stream `error` parts were ignored, so any death without
@@ -152,7 +161,7 @@ attempt (including overload retries) burns units; `RetryInfo` countdowns can
 mislead on daily caps (UTC-midnight reset).
 
 Fix: capture `error` parts into `streamError`; `MaxIterationsError(reason,
-detail?)` carries `steps|quota|overload`; partial notes and free errors name
+detail?)` now carries `steps|quota|overload|timeout`; partial notes and free errors name
 the true cause (quota countdown parsed from detail when present).
 
 ## 12. `AI_UnsupportedModelVersionError: Unsupported model version v4` on every improve call

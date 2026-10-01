@@ -116,35 +116,6 @@ export function WorkspaceClient({
   // Edit-model toggle (chat panel). Gemini default; only follow-up improve
   // runs use it — first prompts always generate with Gemini.
   const [editModel, setEditModel] = useState<EditModelId>("gemini");
-  // OpenRouter key spending budget (display-only, never blocks sending).
-  const [openRouterBudget, setOpenRouterBudget] = useState<{
-    configured: boolean;
-    remaining: number | null;
-    limit: number | null;
-  } | null>(null);
-  const refreshOpenRouterBudget = useCallback(async () => {
-    try {
-      const res = await fetch("/api/models/openrouter-budget");
-      if (!res.ok) return;
-      setOpenRouterBudget((await res.json()) as {
-        configured: boolean;
-        remaining: number | null;
-        limit: number | null;
-      });
-    } catch {
-      // silent — the toggle works without the numbers
-    }
-  }, []);
-  // Numbers only display while Nemotron is selected: fetch on toggle (event
-  // handler, not an effect) and after every Nemotron run (in the handler's
-  // finally). No mount fetch needed — Gemini is the default view.
-  const handleEditModelChange = useCallback(
-    (m: EditModelId) => {
-      setEditModel(m);
-      if (m === "nemotron") refreshOpenRouterBudget();
-    },
-    [refreshOpenRouterBudget]
-  );
   const [versions, setVersions] = useState<VersionSummary[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [githubConnected, setGithubConnected] = useState(initialGithubConnected);
@@ -604,7 +575,7 @@ export function WorkspaceClient({
           return;
         }
         if (!res.ok || !res.body) {
-          // Surfaces server-provided messages (e.g. NEMOTRON_NOT_CONFIGURED)
+          // Surfaces server-provided messages (e.g. GLM_NOT_CONFIGURED)
           // instead of a generic failure. Refund + rollback like 402.
           const data = (await res.json().catch(() => null)) as {
             message?: string;
@@ -731,7 +702,7 @@ export function WorkspaceClient({
           duration:
             code === "QUOTA_EXCEEDED" || code === "MODEL_OVERLOADED"
               ? Math.min(15000, Math.max(8000, (retryAfter ?? 50) * 1000))
-              : code === "MAX_ITERATIONS"
+              : code === "MAX_ITERATIONS" || code === "AI_TIMEOUT"
                 ? 8000
                 : 5000,
         });
@@ -745,8 +716,6 @@ export function WorkspaceClient({
         if (!confirmed) router.refresh();
         improveAbortRef.current = null;
         setIsImproving(false);
-        // Refresh the account spending-budget display after OpenRouter runs.
-        if (model === "nemotron") refreshOpenRouterBudget();
       }
     },
     // fileData intentionally omitted — read via fileDataRef above
@@ -757,7 +726,6 @@ export function WorkspaceClient({
       userId,
       editModel,
       refreshVersions,
-      refreshOpenRouterBudget,
       decrementOptimistic,
       refundOptimistic,
       applyAuthoritative,
@@ -873,8 +841,7 @@ export function WorkspaceClient({
             appTitle={fileData?.title ?? workspace?.title ?? null}
             width={chatWidth}
             editModel={editModel}
-            onEditModelChange={handleEditModelChange}
-            openRouterBudget={openRouterBudget}
+            onEditModelChange={setEditModel}
           />
         )}
         {!focusMode && (

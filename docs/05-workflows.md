@@ -33,14 +33,14 @@ request instead of silently creating in another organization.
 and current model choice; preview errors use **Fix with AI**.
 
 1. Send project ID, expected revision, request/history, files, and allowlisted
-   editing model (Gemini/Nemotron/Atria).
+   editing model (Gemini/GLM/Atria).
 2. Server validates, screens/rate-limits, verifies project-org membership,
    checks credits/revision, and claims user **and project** AI leases.
 3. Agent mutates per-run file/dependency maps using tools; progress arrives as
    `thinking` / `file_patch`. Overload retries reset maps for each attempt.
 4. No changes → free `done`, no snapshot/commit, freshly read balance.
 5. Valid changed work → validate packages/cancellation and shared save helper.
-   A step-limited partial edit can be retained for one credit with `partial: true`.
+   A step/time-limited partial edit can be retained for one credit with `partial: true`.
 6. Completed file data, revision, and balance update client state; refresh
    history. Release leases in finalization.
 
@@ -73,9 +73,14 @@ logged without falsely reporting a failed/uncharged generation.
 
 ## D. Cancellation and uncertain completion
 
-Stop, navigation, stream cancellation, or the execution timeout propagates to
+Stop, navigation, stream cancellation, or the hard execution timeout propagates to
 the provider/persistence signal. Cancellation is checked after package lookups
 and before transaction completion. UI unmount aborts live controllers.
+
+Editing has a separate 240-second **model** deadline, leaving 50 seconds before
+the hard deadline for validation/saving/response. It preserves completed valid
+tool updates through the normal partial-save path; it does not persist an
+incomplete tool argument or bypass a user cancellation/revision/credit check.
 
 **Boundary:** aborting after the database commits does not undo that commit,
 and the provider may still charge for already-started work. If the response

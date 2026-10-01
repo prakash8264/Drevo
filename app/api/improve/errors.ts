@@ -71,8 +71,8 @@ export function collectErrorText(err: unknown, depth = 0): string {
 export function isQuotaError(err: unknown): boolean {
   // AI SDK v7 surfaces provider failures as typed errors (e.g. AI_APICallError
   // carries statusCode). Check that first, then fall back to deep text
-  // matching. Covers Gemini (429) and OpenRouter (429 rate-limit, 402
-  // account-credit) shapes.
+  // matching. Covers Gemini (429), NVIDIA trial limits (429/402), and
+  // compatible providers' rate-limit/account-credit shapes.
   const statusCode = (err as { statusCode?: number })?.statusCode;
   if (statusCode === 429 || statusCode === 402) return true;
   return /quota|exceed.*current quota|generate_content_free_tier|rate.limit|rate_limit|429|resource exhausted|insufficient credits|over credit|credit limit/i.test(
@@ -91,9 +91,9 @@ export function quotaErrorPayload(
   // response headers as a last resort.
   const retryAfter =
     getQuotaRetryAfter(raw) ?? retryAfterHint ?? getRetryAfterHeader(err);
-  // Nemotron runs on a shared free pool: point at the escape hatch.
+  // NVIDIA trial capacity/rate limits are separate from Drevo credits.
   const switchHint =
-    providerLabel === "Nemotron" ? " You can switch to Gemini and keep working." : "";
+    providerLabel === "GLM" ? " You can switch to Gemini and keep working." : "";
   return {
     message: retryAfter
       ? `${providerLabel} rate limit hit. Please retry in ~${retryAfter}s. No credits were deducted.${switchHint}`
@@ -133,19 +133,20 @@ export function overloadErrorPayload(
 export class MaxIterationsError extends Error {
   // Why the run ended without completion: exhausted step budget ("steps"),
   // a mid-stream rate-limit error part ("quota"), or a mid-stream overload
-  // error part ("overload"). The catch below words the partial note honestly
+  // error part ("overload"), or the model time budget ("timeout"). The catch
+  // below words the partial note honestly
   // from this instead of always blaming the step budget. `detail` carries
   // the raw stream-error text for quota payloads (retry countdowns);
   // `retryAfter` carries a Retry-After header value when one was present.
-  reason: "steps" | "quota" | "overload";
+  reason: "steps" | "quota" | "overload" | "timeout";
   detail?: string;
   retryAfter?: number | null;
   constructor(
-    reason: "steps" | "quota" | "overload" = "steps",
+    reason: "steps" | "quota" | "overload" | "timeout" = "steps",
     detail?: string,
     retryAfter?: number | null
   ) {
-    super("Agent runtime exceeded maxIterations");
+    super(reason === "timeout" ? "Agent reached its time limit" : "Agent runtime exceeded maxIterations");
     this.name = "MaxIterationsError";
     this.reason = reason;
     this.detail = detail;

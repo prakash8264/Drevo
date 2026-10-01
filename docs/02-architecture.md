@@ -10,7 +10,7 @@ Browser: React hooks + Clerk/theme providers + Sandpack
   -> Next.js server components, server actions, and API routes
      -> Clerk: identity, organization membership, subscriptions/checkout
      -> Prisma/PostgreSQL: application data and shared credit balances
-     -> Gemini/OpenRouter/Atria: AI generation and editing
+     -> Gemini/NVIDIA GLM/Atria: AI generation and editing
      -> GitHub: user's repositories through their encrypted OAuth token
      -> Supabase Storage: uploaded reference images
 Clerk -> signed Svix webhook -> current provider state -> Prisma mirror
@@ -162,7 +162,7 @@ Keep server secrets out of `NEXT_PUBLIC_*` variables and out of documentation.
 | `DIRECT_URL` | Prisma CLI datasource in `prisma7.config.ts`; intended migration DB |
 | `GEMINI_API_KEY` | Initial generation and Gemini edits |
 | `GEMINI_FALLBACK_MODEL` | Optional Gemini overload fallback; empty disables |
-| `OPENROUTER_API_KEY` | Optional NVIDIA Nemotron 3 Ultra (free) editing and account spending-budget display |
+| `NVIDIA_API_KEY` | Optional GLM-5.3-Flash editing directly through NVIDIA API Catalog; server-only |
 | `ATRIA_API_KEY` | Optional Atria editing |
 | `ARCJET_KEY` | Global and AI-route protection |
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser image upload; bucket policies must enforce authorization |
@@ -179,6 +179,10 @@ text; actual multimodal input remains deferred.
 
 - Both AI routes use Node.js, a 300-second route budget, SSE, and a combined
   request/disconnect/290-second timeout signal. AI leases expire after six minutes.
+- Editing stops model work at 240 seconds (including retries), leaving 50 seconds
+  for validation, atomic saving, history cleanup, and the response. Completed
+  valid tool updates can be saved as an explicit partial result; Stop/navigation
+  still cancel saving. A hard deadline emits `AI_TIMEOUT` instead of silent EOF.
 - Global Arcjet shield/bot checks skip loopback development hosts and the exact
   signed Clerk webhook endpoint. The webhook still verifies the original body.
 - Both AI routes use shared user-based rate/prompt protection, including no-ops.
