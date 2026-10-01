@@ -6,32 +6,20 @@ import { db } from "@/lib/prisma";
 import type { FileData } from "@/types/workspace";
 import type { VersionDetail, VersionSummary } from "@/types/version";
 import { requireId } from "@/lib/validation";
-import { pruneVersionsBestEffort } from "@/lib/versions";
+import { createWorkspaceVersion, lockWorkspaceHistory, MAX_VERSIONS_PER_WORKSPACE, pruneVersionsBestEffort, readVersionFileData } from "@/lib/versions";
 
 export type { VersionDetail, VersionSummary } from "@/types/version";
-
-// "use server" modules may only export async functions, so this stays private.
-const MAX_VERSIONS_PER_WORKSPACE = 20;
 
 function toSummary(v: {
   id: string;
   summary: string | null;
-  fileData: unknown;
+  fileCount: number;
   createdAt: Date;
 }): VersionSummary {
-  const files =
-    typeof v.fileData === "object" &&
-    v.fileData !== null &&
-    "files" in v.fileData &&
-    typeof (v.fileData as Record<string, unknown>).files === "object"
-      ? Object.keys(
-          (v.fileData as Record<string, Record<string, unknown>>).files ?? {}
-        ).length
-      : 0;
   return {
     id: v.id,
     summary: v.summary,
-    fileCount: files,
+    fileCount: v.fileCount,
     createdAt: v.createdAt,
   };
 }
@@ -67,8 +55,8 @@ export async function getVersions(
 
   const versions = await db.workspaceVersion.findMany({
     where: { workspaceId, workspace: { organization: { members: { some: { user: { clerkId } } } } } },
-    select: { id: true, summary: true, fileData: true, createdAt: true },
-    orderBy: { createdAt: "desc" },
+    select: { id: true, summary: true, fileCount: true, createdAt: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: MAX_VERSIONS_PER_WORKSPACE,
   });
 
@@ -93,24 +81,24 @@ export async function restoreVersion(
   const orgIds = await getUserOrgIds(clerkId);
   await assertOrgAccess(workspaceId, orgIds);
 
-  const version = await db.workspaceVersion.findUnique({ where: { id: versionId, workspaceId } });
-  if (!version) redirect("/");
-  const restoredFileData = version.fileData as unknown as FileData;
-  await db.$transaction(async (tx) => {
+  const restored = await db.$transaction(async (tx) => {
+    await lockWorkspaceHistory(tx, workspaceId);
     const workspace = await tx.workspace.findFirst({
       where: { id: workspaceId, organizationId: { in: orgIds }, revision: expectedRevision },
       select: { fileData: true },
     });
     if (!workspace) throw new Error("Workspace changed. Reload before restoring.");
+    const version = await tx.workspaceVersion.findUnique({ where: { id: versionId, workspaceId } });
+    if (!version) redirect("/");
+    const restoredFileData = await readVersionFileData(tx, workspaceId, versionId) as FileData;
     const updated = await tx.workspace.updateMany({
       where: { id: workspaceId, revision: expectedRevision, organization: { members: { some: { user: { clerkId } } } } },
       data: { fileData: restoredFileData as never, revision: { increment: 1 } },
     });
     if (!updated.count) throw new Error("Workspace changed. Reload before restoring.");
-    if (workspace.fileData) await tx.workspaceVersion.create({
-      data: { workspaceId, fileData: workspace.fileData as never, summary: "Before restore" },
-    });
-  });
+    if (workspace.fileData) await createWorkspaceVersion(tx, workspaceId, workspace.fileData, "Before restore");
+    return { ...toSummary(version), fileData: restoredFileData, revision: expectedRevision + 1 };
+  }, { timeout: 15000 });
   await pruneVersionsBestEffort(workspaceId);
-  return { ...toSummary(version), fileData: restoredFileData, revision: expectedRevision + 1 };
+  return restored;
 }

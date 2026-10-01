@@ -11,7 +11,7 @@ test("additive migration preserves balances/history and enforces grants, leases,
   try {
     const root = resolve(__dirname, "../prisma/migrations");
     const latest = "20261001090000_security_billing_persistence";
-    for (const name of readdirSync(root).filter((name) => /^\d/.test(name) && name !== latest).sort()) {
+    for (const name of readdirSync(root).filter((name) => /^\d/.test(name) && name < latest).sort()) {
       await db.exec(readFileSync(resolve(root, name, "migration.sql"), "utf8"));
     }
     await db.exec(`

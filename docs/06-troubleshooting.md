@@ -1,5 +1,36 @@
 # 06 — Troubleshooting (errors seen + fixes applied)
 
+Last reviewed: **2026-10-01**. Entries 1–18 below preserve earlier integration
+history; where current behavior differs, use the architecture/deep-dive guides.
+The full security/billing audit, root causes, and unresolved items are in
+[10-audit-findings-and-fixes.md](./10-audit-findings-and-fixes.md).
+
+## Current security/billing diagnostics
+
+| Symptom | Cause / safe response |
+|---|---|
+| Workspace changed / 409 on edit or restore | Another save/restore changed the revision. Reload latest files; do not remove the revision guard. |
+| AI request already running / 409 | User/project lease still active. Wait for completion; crashed runs expire after six minutes. Do not manually clear a live lease casually. |
+| New additional organization has zero credits | Expected policy: one user trial in the initial personal org, not 10 credits per new org. |
+| Repeated Sync plan does not add credits | Expected idempotency: same org/plan/period receipt grants once; historical baseline can record a zero receipt. |
+| Billing Sync 503 during Clerk outage | Fail-closed preservation, not automatic Free. Retry after provider recovery; do not edit balance or replay real payments. |
+| Organization deletion blocked | Other provider/local members or active/unresolved paid item. Remove members, cancel/wait for period end, then retry. |
+| Connection ended before completion confirmed | Done event may have been lost after commit. Refresh/review saved project and balance before retrying. |
+| GitHub push succeeded but tracking warning | Remote succeeded; local metadata failed. Inspect repo; retrying create can collide with already-created repo. |
+| Old global GitHub link absent on reload | Legacy link isn't safely attributable to a member/target; exact target tracking starts next successful push. |
+| Webhook fails before handler | Check signature secret/raw-body verification and provider logs; exact route is exempt from bot detection, not from signature validation. |
+| `.next/types` file-not-found during `tsc` | A concurrent build is regenerating generated types. Wait for build completion and rerun `tsc` serially. |
+
+Use `npm test` for isolated regressions. **Do not** use signed replay/backfill/
+live concurrency scripts as casual diagnostics; see
+[09 operational safety](./09-multi-tenancy.md#scripts-and-operational-safety).
+
+Repository-wide ESLint debt remains in
+`components/animate-ui/components/backgrounds/hole.tsx`; an unused `Badge` import
+also remains in the separately edited homepage. These are not fixed by billing
+or authorization changes. The prior fix session's build/changed-file checks
+passed; a passing build is not a live integration test.
+
 ## 1. `Module not found: Can't resolve '@clerk/themes'` — `app/layout.tsx:6`
 Cause: `import {dark} from "@clerk/themes"` but package not in `package.json`.
 Fix: `npm install @clerk/themes` (now `^2.4.57`).
@@ -21,7 +52,7 @@ Fix: create Starter/Pro plans in Clerk Dashboard (same app/env), copy real `cpla
 - Stream crash: unsafe `controller.enqueue/close` double-close + abort-during-stream.
 Fixes applied:
 - `safeEnqueue/safeClose` + `closed` flag + `request.signal abort` in both routes; removed early `close()` before `return`.
-- `isQuotaError/quotaErrorPayload` -> friendly `error{code:QUOTA_EXCEEDED,retryAfter}`; no credit deduction on failure.
+- `isQuotaError/quotaErrorPayload` -> friendly `error{code:QUOTA_EXCEEDED,retryAfter}`. Failed/unsaved work is free; current explicit partial-save branches are detailed in 08.
 - `maxIterations 8 -> 5 -> 12` (final: 12 turns, early stop via `done_improving`).
 - `WorkspaceClient` split JSON-parse vs event handling (inner catch was swallowing error events), quota toasts 8–15s.
 Left for you (ops): enable Gemini billing / switch model / monitor at `ai.dev/rate-limit`.
@@ -105,7 +136,7 @@ OpenCode"` — identical gate to `muse-spark-1.3-contributor-free`, despite
 MiMo using the standard chat endpoint. So the gate is per free-model
 policy, not endpoint-specific, and no request shape avoids it. Per plan:
 no code was added for MiMo (swap stopped at the probe); the Spark toggle
-slot stays as-is pending a separate decision. Legitimate alternatives
+  slot was subsequently replaced by Atria (see #18). Legitimate alternatives
 unchanged: paid Zen models (no caller gate), Meta-direct Contributor tier,
 or more OpenRouter `:free` models through the existing Qwen plumbing.
 
@@ -117,10 +148,11 @@ credit) but wrong story. Also note the free-tier daily cap surfacing here:
 attempt (including overload retries) burns units; `RetryInfo` countdowns can
 mislead on daily caps (UTC-midnight reset).
 
-## 12. `AI_UnsupportedModelVersionError: Unsupported model version v4` on every improve call
 Fix: capture `error` parts into `streamError`; `MaxIterationsError(reason,
 detail?)` carries `steps|quota|overload`; partial notes and free errors name
 the true cause (quota countdown parsed from detail when present).
+
+## 12. `AI_UnsupportedModelVersionError: Unsupported model version v4` on every improve call
 Cause: dependency drift — top-level `ai` had floated to 6.0.280 while
 `@ai-sdk/google` floated to 4.0.67 (v4-spec models), plus orphaned
 `node_modules/@cline` remnants (incl. a nested `ai@7`) left behind by an
@@ -140,9 +172,10 @@ denies localhost requests while the same request with a public IP passes
 (verified: browser-UA curl → 403, identical request + `X-Forwarded-For:
 8.8.8.8` → 200). Pure local-dev issue — production behind Vercel always sees
 real public IPs.
-Fix: `proxy.ts` skips the Arcjet check when the request host is loopback
-(`localhost`, `127.0.0.1`, `[::1]`) — Clerk auth still applies, and every
-non-localhost host always goes through Arcjet. Denials now also log
+Fix: `proxy.ts` skips the global Arcjet check when the request host is loopback
+(`localhost`, `127.0.0.1`, `[::1]`) — Clerk auth still applies, and
+non-localhost traffic goes through Arcjet except the exact signed Clerk webhook.
+Both AI routes retain their own rate/prompt screen. Denials also log
 `[proxy] Arcjet denied request:` with reason for future diagnosis.
 
 ## 10. GitHub OAuth setup pitfalls
@@ -151,7 +184,8 @@ non-localhost host always goes through Arcjet. Denials now also log
 - Empty `GITHUB_CLIENT_ID/SECRET` → connect returns 500 "not configured".
 - Keep **"Expire user access tokens" unchecked** — Drevo stores the access
   token as-is with no refresh flow; expiring tokens break pushes.
-- `POST /user/repos is deprecated` (Octokit warning, sunset Mar 2028) —
-  safe to ignore.
+- `POST /user/repos` deprecation warning was previously observed with a March
+  2028 sunset — review current provider guidance when updating this integration.
 - Retrying a failed create-push with the same name → our 409 "already
-  exists": delete the empty repo, or use retry-into-repo / existing tab.
+  exists": inspect the repo first, then use retry-into-repo / existing tab.
+  Do not delete a repository merely because an app response was lost.

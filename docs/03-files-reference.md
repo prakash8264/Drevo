@@ -1,257 +1,142 @@
-# 03 — Files reference (which file does what)
+# 03 — Files Reference
 
-## `app/layout.tsx`
-Root layout. Loads `DM_Sans` + `Lora` fonts, `globals.css`, wraps in
-`ClerkProvider appearance={{theme: dark}}` (`@clerk/themes`), renders
-`Header`, `ThemeProvider`, `Toaster`. Metadata title
-`Drevo — Dream it. Develop it.`, favicon `/favicon.svg`.
+Last reviewed: **2026-10-01**. This is a responsibility map, not a line-number
+index. Contracts are in [04](./04-functions-reference.md); causes of security
+changes are in [10](./10-audit-findings-and-fixes.md).
 
-## `app/page.tsx` (client landing)
-Hero with `HoleBackground`, rotating `PLACEHOLDERS`, prompt textarea
-(auto-resize to 200px), suggestion chips, Generate button. If signed in →
-`router.push(/workspace?prompt=)`, else `SignInButton modal`. Below:
-browser mockup, `FEATURES` grid, `STEPS` timeline, `PRICING_PLANS` grid
-with `CheckoutButton`, CTA + footer (footer logo = `LogoMark`).
+## Pages and layout
 
-## `app/(auth)/layout.tsx`
-`AuthLayout({children})` → centered flex container with `pt-16`. Only
-purpose is to center Clerk forms.
+| File | Responsibility |
+|---|---|
+| `app/layout.tsx` | DM Sans/Lora, metadata, favicon, theme wrapper, header, toaster |
+| `app/page.tsx` | Prompt landing page, feature/pricing sections, guarded organization checkout |
+| `app/(auth)/layout.tsx` | Centered auth-page container |
+| `app/(auth)/sign-in/[[...sign-in]]/page.tsx`, `sign-up/.../page.tsx` | Clerk prebuilt auth forms |
+| `app/(auth)/accept-invitation/[[...accept-invitation]]/page.tsx` | Targeted invitation/authentication flow; named invitation selection for untargeted links |
+| `app/(main)/layout.tsx` | Offset for fixed header |
+| `app/(main)/workspace/page.tsx` | `getWorkspaceUser(id)` plus authorized project loading; component key includes org/project/revision |
+| `app/(main)/projects/page.tsx` | Active-org project cards and empty state |
+| `proxy.ts` | Clerk middleware, protected-page redirects, invitation-ticket forwarding, global Arcjet checks; signed-webhook exemption |
 
-## `app/(auth)/sign-in/[[...sign-in]]/page.tsx`, `sign-up/.../page.tsx`
-Thin wrappers returning `<SignIn/>` / `<SignUp/>`. Catch-all `[[...]]`
-lets Clerk handle sub-routes.
+## AI routes and modules
 
-## `app/(main)/layout.tsx`
-`layout({children}) => <div mt-16>{children}</div>`. Offsets fixed
-`Header h-16`.
+| File | Responsibility |
+|---|---|
+| `app/api/gen-ai-code/route.ts` | Gemini full JSON generation, thought statuses, overload retries/fallback, validated output, shared transactional save |
+| `app/api/improve/route.ts` | Request/context guards, model resolution, shared rate/lease protection, agent orchestration, no-op/partial/error classification |
+| `app/api/improve/agent-tools.ts` | Safe `update_file`, bounded `add_dependency`, `done_improving` tools |
+| `app/api/improve/agent-prompts.ts` | Bounded history, file context, instructions, URL-text image references |
+| `app/api/improve/agent-run.ts` | AI SDK tool loop, captured stream errors, fresh state per overload retry, abort-aware backoff |
+| `app/api/improve/agent-finish.ts` | Dependency validation, changed-path calculation, finalization through `saveAiWorkspace` |
+| `app/api/improve/errors.ts` | Nested provider-error matching, retry hints, quota/overload payloads, `MaxIterationsError` |
+| `app/api/improve/models/index.ts` | Model allowlist and configuration-error responses |
+| `app/api/improve/models/gemini.ts` | Gemini provider and default model |
+| `app/api/improve/models/qwen.ts` | OpenRouter Qwen provider |
+| `app/api/improve/models/atria.ts` | Text-only Atria Chat Completions provider |
+| `app/api/models/qwen-budget/route.ts` | Server-only OpenRouter quota lookup; display data, not credit authority |
 
-## `app/(main)/workspace/page.tsx`
-Server. Reads `searchParams {prompt?, id?}`, calls `getWorkspaceUser()`,
-optional `getWorkspaceById(id, user.id)`, renders
-`WorkspaceClient{initialPrompt, workspace, userCredits, userId,
-githubConnected, githubUsername}`.
+## Organization and webhook routes
 
-## `app/(main)/projects/page.tsx`
-Server. `auth()` guard → `getUserProjects()` → header + `EmptyState`
-(no projects) or `ProjectCard` grid.
+| Path under `app/api/` | Responsibility |
+|---|---|
+| `orgs/route.ts` | Membership-based organization list and selected organization |
+| `orgs/switch/route.ts` | Validate target membership and persist selected org |
+| `orgs/create/route.ts` | Zero-credit additional organization, local OWNER, Clerk creator/metadata, visible provisioning errors |
+| `orgs/repair/route.ts` | Targeted OWNER-only counterpart recovery / empty legacy-org repair; no billing transfer |
+| `orgs/members/route.ts` | List members of validated active org |
+| `orgs/members/add/route.ts` | Clerk invitation email, caller verification, authoritative self-healing for existing provider membership |
+| `orgs/members/role/route.ts` | Clerk-first ADMIN/MEMBER changes; owner/self-role protections |
+| `orgs/members/remove/route.ts` | Clerk-first removal/self-leave; sole-owner checks and active-pointer repair |
+| `orgs/invitations/complete/route.ts` | Verify current Clerk membership, mirror, select accepted org |
+| `orgs/sync/route.ts` | OWNER/ADMIN-requested authoritative membership sync, including removals/roles |
+| `orgs/delete/route.ts` | OWNER-only; provider member/billing checks, Clerk-first deletion, local cascade/pointer repair |
+| `orgs/billing/checkout/route.ts` | OWNER preflight; require matching Prisma/client/session Clerk organizations |
+| `orgs/billing/sync/route.ts` | Manual authoritative plan/grant sync fallback |
+| `webhooks/clerk/route.ts` | Raw-body Svix verification; billing/membership/lifecycle reconciliation |
 
-## `app/api/gen-ai-code/route.ts`
-One-shot generation API (Gemini JSON mode). Full detail in
-[04-functions-reference](./04-functions-reference.md) and
-[08-ai-agent-deep-dive](./08-ai-agent-deep-dive.md): guards (401/400/404/
-402), `generateContentStream` with thoughts → `status` events,
-JSON parse → npm validation → Prisma transaction
-(workspace upsert + optional version snapshot + credit decrement) →
-`done`. Arcjet invocation currently commented out.
+## GitHub routes
 
-## `app/api/improve/route.ts`
-Orchestration only. Guards (401/400/404/402) → `resolveImproveModel` (+
-`notConfiguredResponse` 400s) → `createImproveTools` /
-prompt builders / `createFinishRun` wiring → `runAgentWithRetries` (+
-Gemini-only `GEMINI_FALLBACK_MODEL`) → outcome classification (NO_OP,
-`done`) → cause-honest error map. Engine, tools, prompts, persistence,
-errors, providers live in sibling modules (below).
+All tokens are user-owned and stay server-side. See [07](./07-github-integration.md).
 
-## `app/api/improve/errors.ts`, `models/`, `agent-tools.ts`, `agent-prompts.ts`, `agent-finish.ts`, `agent-run.ts`
-Error taxonomy (matchers, payloads, `MaxIterationsError(reason, detail)`);
-per-model resolvers (`gemini/qwen/atria.ts` + allowlist `index.ts`);
-tool factory (3 tools, explicit state); prompt builders; finish transaction
-factory + `diffPaths`; retried tool loop + forwarding. Streams
-`thinking/file_patch/done/error`; finish saves messages + fileData
-+ snapshot + 1 credit; partial-save path when the iteration budget runs
-out after files changed. Full detail in 04 + 08.
+| Path under `app/api/github/` | Responsibility |
+|---|---|
+| `connect/route.ts` | OAuth redirect and httpOnly state/workspace cookies |
+| `callback/route.ts` | State check, token exchange, account fetch, encrypted credential storage |
+| `status/route.ts` | Connection boolean/username only |
+| `disconnect/route.ts` | Clear saved credentials; do not delete remote repos |
+| `repos/route.ts` | Connected user's own-repository picker |
+| `branches/route.ts` | Validated own-repository branch list |
+| `push/route.ts` | Saved DB files → shared export → non-forced push; exact-target deletion history; post-push tracking warning |
 
-## `app/api/github/connect/route.ts`
-OAuth start. Clerk guard → random `state` + optional `workspaceId` in
-httpOnly cookies → 302 to `github.com/login/oauth/authorize`
-(`repo read:user`). 500 when the OAuth App env is missing.
+## Server actions
 
-## `app/api/github/callback/route.ts`
-OAuth callback. Validates `state` (`?github=error` redirect on mismatch),
-exchanges `code` for a token, fetches the GitHub user, stores the
-**encrypted** token + username on `User`, redirects to
-`/workspace?id=…&github=connected`.
+| File | Responsibility |
+|---|---|
+| `actions/workspace.ts` | Workspace-scoped role/credits/context; membership-authorized files/revision; current user's last push target |
+| `actions/projects.ts` | Active-org listing, strict ID plus OWNER/ADMIN-scoped project deletion |
+| `actions/versions.ts` | Authorized history listing and revision-checked free restore; **does not export pruning** |
+| `types/workspace.ts`, `types/project.ts`, `types/plans.ts`, `types/version.ts` | Shared serializable contracts |
 
-## `app/api/github/status/route.ts`
-Returns `{connected: boolean, username}` — boolean only, token never
-selected. Used by the dialog after OAuth return.
+## Components
 
-## `app/api/github/disconnect/route.ts`
-`DELETE` nulls the four GitHub columns on `User`. Pushed repos untouched.
+| File | Responsibility |
+|---|---|
+| `components/WorkspaceClient.tsx` | Local workspace state/refs; SSE handling, revisions, optimistic credits, cancellation, restore/regenerate/edit/fix orchestration |
+| `components/ChatPanel.tsx` | Prompt/message UI, model toggle, upload to `workspace-images` using org/project path, copy/regenerate/edit/Stop |
+| `components/CodePanel.tsx` | Sandpack provider/preview/source, runtime error display, ZIP, versions, device/focus controls, quick GitHub update |
+| `components/GithubPushDialog.tsx` | Connect, new/existing repo forms, safe retry feedback, tracking-failure warning |
+| `components/Header.tsx` | Server-read active org, transparent fixed nav, theme/user/org/member controls |
+| `components/HeaderCredits.tsx` | Client credit island; adopt server balance, subscribe to matching org only |
+| `components/OrgSwitcher.tsx` | Coordinate Prisma selection and Clerk `setActive`; repair/rollback on failure |
+| `components/MembersDialog.tsx` | Organization members, invitation, role/removal, explicit Sync |
+| `components/PricingModal.tsx` | Organization plan cards, role-aware checkout and manual billing sync |
+| `components/OrganizationCheckoutButton.tsx` | Guard preflight before opening Clerk checkout; recheck client context after awaiting |
+| `components/theme-provider.tsx` | `next-themes` plus theme-aware Clerk provider |
+| `components/ThemeToggle.tsx` | Theme switching |
+| `components/ProjectCard.tsx`, `DeleteProjectModal.tsx` | Project navigation/time-ago and confirmed deletion |
+| `components/MobileBlocker.tsx` | Current desktop-editor limitation |
+| `components/LogoMark.tsx`, `reusables.tsx`, `ui/` | Branding and shared UI primitives |
+| `components/animate-ui/components/backgrounds/hole.tsx` | Landing animation; existing repository-lint debt |
 
-## `app/api/github/repos/route.ts`
-Lists the user's **own** repos (`affiliation=owner`, pushed-desc, 2×100
-pages) with server-side substring `search` → repo cards data. No orgs.
+## Shared helpers
 
-## `app/api/github/branches/route.ts`
-`?repo=owner/name` → `{branches: [{name}]}` (100 cap). Enforces
-owner == connected username; 404 maps to not-found/no-access.
+| File | Responsibility |
+|---|---|
+| `lib/prisma.ts` | `PrismaPg` runtime singleton; generated client |
+| `lib/checkUser.ts` | Request-local user/context loader; established users need one DB read, no billing sync |
+| `lib/org.ts` | Active-org/membership/role helpers; serialized personal-org provisioning and one-time trial allocation |
+| `lib/clerk.ts` | Clerk client, role mapping, exact supported plan-slug mapping |
+| `lib/membership-sync.ts` | Current Clerk list → mirrored roles/members/removals under org lock; optional invitation activation |
+| `lib/billing.ts` | Payer extraction, eligible-item selection, baseline protection, deduplicated additive monthly grants |
+| `lib/validation.ts` | Runtime ID validation and safe project/export path validation |
+| `lib/ai-request.ts` | Zod request/output schemas, limits, Arcjet screening, expiring distributed AI leases, safe error text |
+| `lib/workspace-save.ts` | Shared atomic revision/snapshot/credit commit for both AI routes |
+| `lib/versions.ts` | Internal locked history writes/reconstruction; dependency-safe, non-fatal post-commit pruning |
+| `lib/version-data.ts` | Canonical hashes, bounded text diffs, exact patch verification, checkpoint fallback |
+| `lib/credits-bus.ts` | Organization-scoped, display-only credit events |
+| `lib/export-project.ts` | Safe shared file map for ZIP/GitHub, base deps, scaffold, filename |
+| `lib/github.ts` | OAuth helpers, AES-256-GCM, repo/branch parsing/validation |
+| `lib/github-server.ts` | Server-only connected-user context for listing endpoints and error mapping |
+| `lib/github-push-client.ts` | Shared push/list client contracts including `trackingSaved` |
+| `lib/constants.ts`, `lib/data.ts` | Credit/pricing constants and landing copy |
+| `lib/utils.ts` | Class-name merging |
 
-## `app/api/github/push/route.ts`
-Push engine, `mode: create|existing`. Shared preamble (auth, Zod,
-ownership-checked workspace load, `buildProjectFilesFromFileData()`,
-300-file / 8 MB caps, token decrypt). Create: `POST /user/repos` →
-Contents-API README seed (empty repos reject git-db blobs) → blobs →
-tree on HEAD → commit on HEAD → non-forced ref move. Existing:
-owner-enforced, branch resolve/create, empty-repo seed, overlay tree with
-deletions from `githubPushedFiles`, identical-content early-out
-(`unchanged: true`), non-forced update with 422 → `BRANCH_DIVERGED`.
-Error codes: `GITHUB_NOT_CONNECTED`, `GITHUB_TOKEN_INVALID`,
-`REPO_CREATED_PUSH_FAILED`, `BRANCH_DIVERGED`. No credit deduction.
-Full algorithm in [07](./07-github-integration.md).
+## Schema, checks, and operations
 
-## `app/api/models/qwen-budget/route.ts`
-Free-model daily budget for the toggle microcopy. Reads OpenRouter
-`GET /api/v1/key` server-side (`{data: {limit, limit_remaining}}`,
-60s in-module cache), returns `{configured, remaining, limit}` — key never
-reaches the browser;     failures return unknown numbers, never break chat.
+| File/path | Responsibility |
+|---|---|
+| `prisma/schema.prisma` | Organization ownership, revisions, grant receipts, exact GitHub targets, AI leases |
+| `prisma/migrations/` | Ordered SQL migrations; October security migration is additive |
+| `prisma7.config.ts` | Prisma CLI schema/migrations plus `DIRECT_URL` |
+| `package.json`, `package-lock.json` | Pinned AI pairing, webpack build/test scripts, patched dependency resolutions/overrides |
+| `scripts/test-org-{switch,setup,billing}.cjs` | Isolated org selection, provisioning/checkout, billing/webhook regressions |
+| `scripts/test-organization-invitation.cjs` | Isolated targeted invitation/authorization/raw-body verification tests |
+| `scripts/test-security.cjs` | Actual-source mock regressions for action IDs, saving, cancellation, grants, roles, GitHub, deletion, credit events |
+| `scripts/test-security-database.cjs` | In-memory PostgreSQL migration/data/constraint/rollback/lease/revision checks |
+| `scripts/test-version-history.cjs` | Codec exactness and actual-source migration/history/restore/save/retention tests on in-memory PostgreSQL |
+| `scripts/reconcile-clerk-apply.ts` | Explicit `--apply` only, Clerk → Prisma, linked orgs only; never recreate revoked provider membership |
+| Other backfill/replay/integrity scripts | Operational utilities, not part of the isolated suite; review before execution |
 
-## `actions/workspace.ts`
-`getWorkspaceUser()` — `auth()` → DB user
-(`id/credits/plan` + GitHub token presence/username, mapped to
-`githubConnected: boolean`) else `redirect("/")`.
-`getWorkspaceById(id, userId)` — ownership-checked workspace incl. GitHub
-link fields (dates ISO-stringified) else redirect.
-
-## `actions/projects.ts`
-`getUserProjects()` maps workspaces to `{id, title, firstPrompt (first
-user msg slice 120), createdAt, updatedAt, messageCount}`.
-`deleteProject()` via `deleteMany({id, userId})` + `revalidatePath`.
-
-## `actions/versions.ts` + `types/version.ts` + `WorkspaceVersion` model
-Version history backend. Cap 20 per workspace (`pruneVersions`).
-`getVersions` (ownership-checked, newest-first summaries with file
-counts, no payloads). `restoreVersion` snapshots current as
-`"Before restore"` first so restore is undoable — free, no credits.
-Both AI routes snapshot pre-run `fileData` on success.
-
-## `components/WorkspaceClient.tsx`
-Client orchestrator. Holds `workspaceId, messages, fileData, credits,
-isGenerating/isImproving, statusLog`, `AbortController` refs +
-`messages/workspaceId/fileData/credits` refs against stale closures.
-Hybrid routing via `onGenerate` wrapper (refs): no workspace/files →
-`handleGenerate` (one-shot JSON, always Gemini); otherwise →
-`handleImprove` (agent patch, toggle model). Children get
-`onGenerate/onFixError/handleStop`. Version history (`refreshVersions`,
-`handleRestoreVersion`), `handleRegenerate` (re-run last user msg,
-`appendUser: false` + toggle model, 1 credit), `handleEditMessage`
-(truncate + resubmit), resizable chat (240–560px, `localStorage
-drevo:chat-width`), `focusMode`. Edit-model state (`editModel`, default
-Gemini) + Qwen budget display state (`refreshQwenBudget`, no mount fetch).
-Realtime credits: `applyCredits/decrementOptimistic/refundOptimistic/
-applyAuthoritative` + `creditsRef`, emitting every change on
-`credits-bus`. GitHub link state (`githubConnected/username/lastPush`)
-passed to `CodePanel`.
-
-## `components/ChatPanel.tsx`
-Left panel (resizable, default 320px). Auto-submits `initialPrompt` once,
-auto-resize textarea (Enter → `handleSubmit`), auto-scroll, Supabase image
-upload (`workspace-images`, `userId/workspaceId|new/timestamp.ext`)
-with preview thumbnail, credit badge via `PricingModal`, Gemini/Qwen edit
-toggle + free-quota microcopy (workspace exists only), markdown
-rendering, live `thinking` bubble during improve, no-credits banner, copy
-buttons, Regenerate (1 credit), edit-and-resend (truncate + re-run),
-assistant avatar = `LogoMark sm`.
-
-## `components/CodePanel.tsx`
-Right panel. Outer `CodePanel` creates `SandpackProvider key=filePathKey
-(paths only)` with `template=react`, `files ?? PLACEHOLDER_FILES`,
-`dependencies = BASE_DEPENDENCIES + AI`, Tailwind CDN,
-`recompileMode delayed 500ms`, `device` state. Inner `SandpackInner`
-(pushes diffs via `sandpack.updateFile`, no remount; `show-error/compile`
-→ `previewError` banner + `Fix with AI`; Preview/Code tabs
-`keepMounted`; first-gen overlay vs slim edit status bar; version-history
-dropdown; device toggle; focus-mode button; `handleExportZip` zipping
-`buildProjectFiles()`; `GithubPushDialog`; one-click `Update` button
-(`handleQuickUpdate` → existing-mode push to linked repo) when `lastPush`
-exists.
-
-## `components/GithubPushDialog.tsx`
-Connect + push dialog. Auto-opens on `?github=connected`, strips the param,
-refreshes status. Tabs: **New** (name + Private/Public + message →
-`handlePush`) / **Existing** (debounced search → repo list → branch
-dropdown → `handlePushExisting`). Shared `applyResult()` handles every
-server code; amber `failedRepo` box links created-but-incomplete repos with
-`retryInCreatedRepo()`; green box shows last push. `GithubMark` inline SVG
-(the lucide brand export doesn't exist). `DialogTrigger render=` follows
-the Base-UI pattern.
-
-## `components/Header.tsx` (async server)
-Calls `checkUser()`, renders fixed nav: `LogoMark`, Projects link
-(signed-in), `<HeaderCredits initial={user.credits}/>` (was inline pill +
-now-removed unused imports), `UserButton` / `SignInButton`s.
-
-## `components/HeaderCredits.tsx` (client island)
-`useState(initial)` + render-time adopt on `initial` change (no
-set-state-in-effect) + `subscribeCredits` listener. Renders the Zap credit
-pill inside `PricingModal`.
-
-## `components/LogoMark.tsx`
-Zap logo mark (`lucide Zap`, `fill=currentColor`) in a
-`border-white/10 bg-white/10` box, `size sm (h-6) | md (h-8)`. Used as
-main + short logo (header, footer, chat avatars).
-
-## `components/PricingModal.tsx`
-Billing modal. `activePlanKey` via `has({plan})`, `PRICING_PLANS` cards,
-CTA: active → disabled, free → sign-in/default, paid + signed-in →
-`CheckoutButton`. Doubles as the click target for credit pills.
-
-## `components/ProjectCard.tsx`, `DeleteProjectModal.tsx`, `MobileBlocker.tsx`, `reusables.tsx`, `theme-provider.tsx`, `ui/*`
-Project grid + time-ago (`date-fns`), delete confirm, mobile-only blocker
-(`md:hidden` counterpart to workspace `hidden md:flex`), shared
-titles/headings, next-themes provider, shadcn/Base-UI primitives.
-
-## `lib/constants.ts`, `lib/data.ts`
-`PLANS` (Free 10 / Starter 50 / Pro 150), `CREDIT_COST_PER_GENERATION = 1`,
-`MIN_CREDITS_TO_GENERATE = 1`, `PRICING_PLANS` (`cplan_*` IDs — must exist
-in the same Clerk app/env or checkout returns `plan_not_found`); landing
-copy (`SUGGESTIONS/FEATURES/STEPS/PLACEHOLDERS`).
-
-## `lib/checkUser.ts`
-Clerk → DB sync. `getCurrentPlan()` via `has({plan: pro|starter})`;
-existing + plan change → upgrade-only delta via
-`updateMany({clerkId, plan: old})` race guard; else existing; new →
-`create({credits: PLANS.free.credits, plan: free})`.
-
-## `lib/prisma.ts`, `lib/utils.ts`
-Prisma singleton (`PrismaPg` adapter, `DATABASE_URL`, dev global cache,
-custom output `lib/generated/prisma`); `cn()` class merger.
-
-## `lib/arcjet.ts`
-Route-level client: per-`userId` token bucket (5/60s) + prompt-injection
-detection (LIVE). Note: invocation in `gen-ai-code` is currently commented
-out; `sensitiveInfo` import is unused (rule commented).
-
-## `lib/export-project.ts`
-Shared export builder: `buildProjectFiles()` / `buildProjectFilesFromFileData()`
-(package.json CRA 5 + merged deps, index.html, `src/*`, `src/index.js`,
-README, `.gitignore`, `.env.example`), `exportZipName()`,
-`BASE_DEPENDENCIES`, `GITIGNORE_CONTENT`, `ENV_EXAMPLE_CONTENT`.
-Feeds ZIP + GitHub push so they cannot drift.
-
-## `lib/github.ts`
-AES-256-GCM `encryptToken/decryptToken` (SHA-256-normalized key,
-`iv|tag|ciphertext` base64), `validateRepoName`, `validateBranchName`,
-`parseRepoFullName`, OAuth constants + `getGithubClientId/
-getGithubRedirectUri/buildAuthorizeUrl/newOAuthState`.
-
-## `lib/github-server.ts`
-Server-only: `GithubRouteError(status, code)`, `getGithubContext(clerkId)`
-→ `{userId, username, octokit}` (token never leaves), `githubErrorResponse()`
-maps auth errors → `GITHUB_TOKEN_INVALID`, else 500.
-
-## `lib/github-push-client.ts`
-Client API wrapper: `pushToGithub()` (uniform ok/error incl. `unchanged`),
-`listGithubRepos(search)`, `listGithubBranches(fullName)`. Used by the
-dialog and the Update button identically.
-
-## `lib/credits-bus.ts`
-`emitCredits(n)` / `subscribeCredits(cb)` over
-`CustomEvent("drevo:credits")`. Display-only sync between
-`WorkspaceClient` and `HeaderCredits`.
-
-## `proxy.ts`, `next.config.ts`, `prisma/*`, `public/favicon.svg`
-Middleware (Arcjet shield/bot LIVE + Clerk guard redirecting anon from
-`/workspace|/projects`); Next config; schema + migrations
-(`create_models`, `add_github_push`, `add_github_pushed_files`); Zap-mark
-SVG favicon (replaced `logo.svg`/`logo-short.png`).
+Never assume that a script named `test` or `verify` is read-only. See
+[09](./09-multi-tenancy.md#scripts-and-operational-safety) before running legacy
+utilities against configured credentials.

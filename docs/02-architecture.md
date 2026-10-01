@@ -1,168 +1,187 @@
 # 02 — Architecture
 
+Last reviewed: **2026-10-01**. See [10](./10-audit-findings-and-fixes.md) for why
+the authorization, credit, and persistence safeguards were added.
+
+## System boundaries
+
+```text
+Browser: React hooks + Clerk/theme providers + Sandpack
+  -> Next.js server components, server actions, and API routes
+     -> Clerk: identity, organization membership, subscriptions/checkout
+     -> Prisma/PostgreSQL: application data and shared credit balances
+     -> Gemini/OpenRouter/Atria: AI generation and editing
+     -> GitHub: user's repositories through their encrypted OAuth token
+     -> Supabase Storage: uploaded reference images
+Clerk -> signed Svix webhook -> current provider state -> Prisma mirror
+```
+
+The organization architecture is the **B-variant**: Clerk owns provider identity,
+membership, and billing; Prisma mirrors membership/plan and owns application
+data. It is not a custom Stripe or Razorpay checkout implementation.
+
+## Ownership and authorization
+
+- `Organization` owns projects, plan, balance, and credit-grant receipts.
+- `User` owns identity, selected organization, trial-allocation marker, and
+  GitHub credentials. `createdById` is attribution, not exclusive project access.
+- `OrganizationMember` authorizes project access and spending. All members can
+  read/edit; OWNER/ADMIN can create/delete projects and manage members. Only
+  OWNER can use the app's subscription controls or delete an organization.
+- Existing-project operations use the **project's organization**. New-project
+  creation/listing use the validated active organization.
+- Server actions remain public entry points; they validate IDs and authorize
+  independently of page/middleware checks.
+- Clerk membership/plan mirrors are reconciled by webhooks, invitation
+  completion, or explicit sync, not by a provider read on every page render.
+  A mirror can lag; provider-level enforcement is a separate boundary.
+
 ## Folder structure
 
-```
-app/
-  layout.tsx                    Root layout (fonts, ClerkProvider dark, Header, Toaster)
-  page.tsx                      Landing page (hero prompt -> /workspace)
-  globals.css
-  (auth)/
-    layout.tsx                  AuthLayout: centers SignIn/SignUp
-    sign-in/[[...sign-in]]/page.tsx   <SignIn/>
-    sign-up/[[...sign-up]]/page.tsx   <SignUp/>
-  (main)/
-    layout.tsx                  <div mt-16> offset for fixed Header
-    workspace/page.tsx          Loads user + workspace -> WorkspaceClient
-    projects/page.tsx           Lists projects
-  api/
-    gen-ai-code/route.ts        Generation API (Gemini)
-    improve/route.ts            Orchestration only (~250 lines): guards → model
-      resolve → tool/prompt/finish wiring → run → classify → error map
-    errors.ts                   Error taxonomy: quota/overload matchers +
-      payloads, collectErrorText, MaxIterationsError, streamErrorText
-    models/
-      index.ts                  resolveImproveModel allowlist (raw client
-        strings never reach providers) + notConfiguredResponse 400s
-      gemini.ts                 Gemini resolver (explicit key, sentinel)
-      qwen.ts                   OpenRouter resolver (explicit key, sentinel)
-      atria.ts                  ATRIA ASI resolver (chat completions, sentinel)
-    agent-tools.ts              createImproveTools factory (3 tools)
-    agent-prompts.ts            trimHistory, contexts, instructions, input
-    agent-finish.ts             validateDependencies, diffPaths,
-      createFinishRun (transaction + done payload)
-    agent-run.ts                runAgentWithRetries (loop, forwarding,
-      classification inputs) + sleepOrAbort/backoffMs
-    github/
-      connect/route.ts          OAuth start (state cookie -> github.com)
-      callback/route.ts         OAuth callback (token exchange -> store)
-      status/route.ts           {connected, username} (boolean only)
-      disconnect/route.ts       Clear stored GitHub token
-      repos/route.ts            Own repos list (search)
-      branches/route.ts         Branch list (owner-enforced)
-      push/route.ts             Push create|existing (never force push)
-    models/
-      qwen-budget/route.ts      Qwen free-pool numbers (60s cache, key never leaves)
-actions/
-  workspace.ts                  getWorkspaceUser, getWorkspaceById
-  projects.ts                   getUserProjects, deleteProject
-  versions.ts                   getVersions, restoreVersion, pruneVersions
-components/
-  WorkspaceClient.tsx           Orchestrator: generate/improve/stop, SSE parsing, realtime credits, edit-model toggle + Qwen budget, GitHub state
-  ChatPanel.tsx                 Chat UI + image upload + credits badge + model toggle
-  CodePanel.tsx                 Sandpack preview/code + Update button + export zip + GitHub dialog + error banner
-  GithubPushDialog.tsx          Connect + new/existing push tabs + retry + last-push status
-  Header.tsx                    Nav + LogoMark + HeaderCredits island
-  HeaderCredits.tsx             Client credit pill (listens to credits bus)
-  LogoMark.tsx                  Zap logo mark (sm/md)
-  PricingModal.tsx              Billing modal + CheckoutButton
-  ProjectCard.tsx               Projects grid
-  DeleteProjectModal.tsx, MobileBlocker.tsx,
-  theme-provider.tsx, reusables.tsx, ui/*, animate-ui/*
-lib/
-  constants.ts                  PLANS, CREDIT_COST, PRICING_PLANS (cplan_* IDs)
-  data.ts                       SUGGESTIONS, FEATURES, STEPS, PLACEHOLDERS
-  checkUser.ts                  Clerk->DB sync, plan/credit delta logic
-  prisma.ts                     Prisma singleton
-  arcjet.ts                     Route-level rate-limit + prompt-injection client (enforced in gen-ai-code; denials are free 429s)
-  utils.ts                      cn()
-  export-project.ts             buildProjectFiles* (ZIP + GitHub source of truth), .gitignore/.env.example
-  github.ts                     Token crypto, repo/branch validators, OAuth URL helpers
-  github-server.ts              getGithubContext, GithubRouteError, githubErrorResponse
-  github-push-client.ts         pushToGithub, listGithubRepos, listGithubBranches
-  credits-bus.ts                emitCredits/subscribeCredits (realtime credit sync)
-types/
-  workspace.ts                  Message, FileData, StatusStep, WorkspaceData, WorkspaceUser (+github fields)
-  project.ts, plans.ts, version.ts
-prisma/
-  schema.prisma                 User + Workspace + WorkspaceVersion models
-  migrations/                   …_create_models, …_add_github_push, …_add_github_pushed_files
-proxy.ts                        Clerk + Arcjet middleware, protects /workspace /projects
-public/
-  favicon.svg                   Zap mark favicon (replaced logo.svg/logo-short.png)
+| Path | Responsibility |
+|---|---|
+| `app/layout.tsx` | Fonts, theme wrapper, header, toaster, metadata |
+| `app/(auth)/` | Sign-in, sign-up, targeted invitation acceptance |
+| `app/(main)/workspace/page.tsx` | Authorized workspace/context loading |
+| `app/(main)/projects/page.tsx` | Active-organization project listing |
+| `app/api/gen-ai-code/` | Gemini full-project generation |
+| `app/api/improve/` | Agent orchestration, tools, prompts, providers, retries, finalization |
+| `app/api/orgs/` | Selection, creation, repair, invitations, roles, removal, deletion, billing sync/preflight |
+| `app/api/webhooks/clerk/` | Signed provider-event handling |
+| `app/api/github/` | OAuth, status, repo/branch lists, server-side pushes |
+| `actions/` | Project/workspace/version server actions |
+| `components/` | Chat, preview, organization/billing UI, theme-aware Clerk wrapper |
+| `lib/` | Database, authorization, billing, validation, AI guards/save, export, GitHub, credit events |
+| `types/` | Workspace, message, file, project, plan, version contracts |
+| `prisma/` | Schema and migration history |
+| `scripts/` | Isolated tests plus operational utilities with different safety profiles |
+| `proxy.ts` | Clerk middleware, protected-page routing, global Arcjet checks |
+
+Detailed file descriptions: [03-files-reference.md](./03-files-reference.md).
+
+## Data models
+
+The authoritative schema is [`prisma/schema.prisma`](../prisma/schema.prisma).
+
+| Model | Important fields / constraints |
+|---|---|
+| `User` | Unique `clerkId`/email; nullable `activeOrganizationId` FK (`SetNull` on org deletion); `trialCreditsGrantedAt`; encrypted GitHub token/profile |
+| `Organization` | Nullable unique `clerkOrgId`; `plan`; `credits` default **0**; `billingBaselineAt` and `billingBaselinePlan` |
+| `OrganizationMember` | Unique `(organizationId, userId)`; role OWNER/ADMIN/MEMBER |
+| `Workspace` | Required `organizationId` and `createdById`; JSON messages/file data; integer `revision` default 0 |
+| `WorkspaceVersion` | Project-scoped checkpoint/text delta, immutable same-project base ID, hashes, depth/file count, summary; cascade on project deletion |
+| `OrganizationCreditGrant` | Unique `(organizationId, key)` receipt; allowance increment and receipt commit together |
+| `GithubPushTarget` | Unique `(workspaceId, userId, repoFullName, branch)`; pushed paths and last-success metadata |
+| `AiRunLease` | Unique key, random ownership token, expiry; cross-instance AI concurrency guard |
+
+`Workspace` still has legacy global GitHub columns. They are preserved for data
+compatibility, but current push deletion history and returned link metadata use
+`GithubPushTarget`, not those legacy columns.
+
+```ts
+type Message = { role: "user" | "assistant"; content: string; imageUrl?: string };
+type FileData = {
+  files: Record<string, { code: string }>;
+  dependencies: Record<string, string>;
+  title?: string;
+};
 ```
 
-## Data models (Prisma)
+## Persistence and concurrency
 
-```prisma
-model User {
-  id        String @id @default(cuid())
-  clerkId   String @unique
-  name      String
-  email     String @unique
-  imageUrl  String @default("")
-  credits   Int    @default(10)
-  plan      String @default("free")
-  // GitHub (token encrypted, never sent to client)
-  githubAccessToken String?
-  githubUsername    String?
-  githubUserId      String?
-  githubConnectedAt DateTime?
-  workspaces Workspace[]
-}
-model Workspace {
-  id        String @id @default(cuid())
-  title     String?
-  userId    String
-  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages  Json   @default("[]")   // Message[]
-  fileData  Json?                   // FileData
-  // GitHub link state
-  githubRepoUrl      String?
-  githubRepoFullName String?
-  githubBranch       String?         // defaults to "main" on push
-  lastPushedAt       DateTime?
-  githubPushedFiles  Json?           // string[] paths from last push (deletions)
-  versions  WorkspaceVersion[]
-  @@index([userId])
-}
-model WorkspaceVersion {
-  id          String    @id @default(cuid())
-  workspaceId String
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  fileData    Json
-  summary     String?
-  createdAt   DateTime  @default(now())
-  @@index([workspaceId])
-}
-```
+`lib/workspace-save.ts` is the shared AI commit path. It validates project shape,
+checks cancellation, locks the organization row, rechecks membership and the
+expected workspace revision, updates files/messages, snapshots **database**
+pre-edit files, and deducts one shared credit with `credits >= cost`. All database
+effects roll back together on failure. It returns credits/revision from inside
+the transaction. Version pruning is post-commit and best-effort.
 
-`Message = {role: user|assistant, content: string, imageUrl?: string}`
-`FileData = {files: Record<path,{code:string}>, dependencies: Record<pkg,version>, title?: string}`
+Current `Workspace.fileData` remains full JSONB. Historical pre-edit files use
+checkpoints or text deltas, with at most four patches after a checkpoint. Pruning
+promotes boundary records before deleting bases. See [11](./11-text-patch-version-history.md)
+for reconstruction, format, and coordinated rollout requirements.
 
-## Auth / billing model
+The revision protects against stale writes; the AI lease prevents duplicate
+in-flight provider work per user/existing workspace. Neither is a global client
+store. A late cancellation or lost response **after commit** cannot undo a
+successful database write; the UI refreshes server truth when completion is
+unconfirmed.
 
-- Clerk is source of truth for identity (`clerkId`) and plan (`has({plan: pro|starter})`).
-- DB mirrors `plan + credits` via `checkUser()` on page loads (upgrade-only delta, `updateMany` race guard).
-- `CREDIT_COST_PER_GENERATION = 1`, `MIN_CREDITS_TO_GENERATE = 1`.
-- Both AI routes require credits (402 otherwise, 1 credit each, all plans). No Pro gate on agent edits.
-- Checkout uses `CheckoutButton planId={cplan_*} planPeriod="month"`. Plan IDs must exist in the same Clerk app/env (test vs live) or API returns `plan_not_found`.
+## Billing and credits
 
-## Env
+- `checkUser()` loads/provisions identity and organization context. It does not
+  synchronize subscriptions or calculate credit top-ups.
+- `syncOrgPlan()` reads Clerk under the organization lock and mirrors the
+  current eligible plan. Provider failures propagate instead of meaning Free.
+- Eligible active non-trial monthly paid periods receive an additive allowance;
+  verified paid-payment events can supply delayed historical periods. Unique
+  plan/period receipts prevent repeated delivery from repeating a grant.
+- Existing paid-plan baselines prevent re-awarding the pre-release period.
+  Cancellation/downgrade preserves the balance; annual allowances are not enabled.
+- Trial credits are allocated once per user during initial personal-org
+  provisioning. Additional organizations receive no new trial allocation.
+- Checkout uses Clerk's organization flow behind an OWNER/context preflight.
+  Clerk's own billing permissions still need separate verification because
+  OWNER and ADMIN both map to `org:admin`.
 
-```
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY
-NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in, SIGN_UP_URL=/sign-up
-DATABASE_URL (pooler 6543), DIRECT_URL (5432)
-ARCJET_KEY, GEMINI_API_KEY
-NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY
-GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_REDIRECT_URI (OAuth App; callback must match)
-GITHUB_TOKEN_ENCRYPTION_KEY (AES-256-GCM key for stored GitHub tokens)
-OPENROUTER_API_KEY (Qwen edit path; empty = toggle shows "not configured", Gemini-only)
-```
+Full policy and event lifecycle: [09-multi-tenancy.md](./09-multi-tenancy.md).
 
-## Realtime credits model
+## Client state management
 
-`Header` is a server component (credits read once via `checkUser()`), so
-the pill is a client island: `HeaderCredits initial={credits}` subscribes
-to `lib/credits-bus.ts` (`CustomEvent "drevo:credits"`). `WorkspaceClient`
-emits on every change: optimistic −1 on submit, authoritative
-`creditsRemaining` at SSE `done`, +1 refund on 402/403/429, stream errors,
-aborts, quota/invalid-JSON. Billing stays server-side (DB transaction is
-the truth); the bus is display-only.
+The application does not currently use Zustand or Redux.
 
-## Runtime
+| State | Owner |
+|---|---|
+| Messages, files, model choice, status, credits display | `WorkspaceClient` React state |
+| Latest values for async callbacks, expected revision, cancellation | React refs / `AbortController` |
+| Authentication and client organization context | Clerk provider |
+| Theme and matching Clerk appearance | `next-themes` and `ThemedClerkProvider` |
+| Editor/compiler/preview | Sandpack provider |
+| Navbar credit notifications | Organization-scoped `CustomEvent` bus |
+| Persistent balance, roles, files, revisions | Server/database, not client state |
 
-- `runtime = nodejs`, `maxDuration = 300` on both AI routes.
-- SSE via `ReadableStream`: `data: {type,...}\n\n`, headers `text/event-stream, no-cache, keep-alive`.
-- Safe-SSE pattern: `closed` flag + `safeEnqueue/safeClose` + `request.signal abort` listener (prevents `Controller is already closed`).
+`emitCredits(credits, orgId)` and `subscribeCredits(orgId, callback)` only
+coordinate display for the same organization. Fresh server props and SSE `done`
+reconcile optimistic values. The bus is not a reservation or spending API, and
+does not broadcast other users' spends in real time.
+
+Local state is appropriate while workspace state is owned by one component
+tree. A small shared store could replace the credit bus later if sharing becomes
+hard to maintain, but is not required for correctness or server authorization.
+
+## Environment
+
+Keep server secrets out of `NEXT_PUBLIC_*` variables and out of documentation.
+
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` | Matching Clerk instance; identity/organization APIs |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_URL`, `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | Auth routes, typically `/sign-in`, `/sign-up` |
+| `CLERK_WEBHOOK_SECRET` | Svix signature verification for `/api/webhooks/clerk` |
+| `DATABASE_URL` | Runtime PostgreSQL connection through `PrismaPg` |
+| `DIRECT_URL` | Prisma CLI datasource in `prisma7.config.ts`; intended migration DB |
+| `GEMINI_API_KEY` | Initial generation and Gemini edits |
+| `GEMINI_FALLBACK_MODEL` | Optional Gemini overload fallback; empty disables |
+| `OPENROUTER_API_KEY` | Optional Qwen editing and budget display |
+| `ATRIA_API_KEY` | Optional Atria editing |
+| `ARCJET_KEY` | Global and AI-route protection |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser image upload; bucket policies must enforce authorization |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | GitHub OAuth app |
+| `GITHUB_REDIRECT_URI` | Exact registered callback, `/api/github/callback` |
+| `GITHUB_TOKEN_ENCRYPTION_KEY` | Server-side encryption of stored OAuth tokens |
+| `NEXT_PUBLIC_APP_URL` | Optional public origin for invitation redirect URLs |
+
+Public Supabase credentials identify the project; they do not authorize an
+organization path by themselves. The current AI prompts carry image URLs as
+text; actual multimodal input remains deferred.
+
+## Runtime and delivery
+
+- Both AI routes use Node.js, a 300-second route budget, SSE, and a combined
+  request/disconnect/290-second timeout signal. AI leases expire after six minutes.
+- Global Arcjet shield/bot checks skip loopback development hosts and the exact
+  signed Clerk webhook endpoint. The webhook still verifies the original body.
+- Both AI routes use shared user-based rate/prompt protection, including no-ops.
+- Production: `next build --webpack`; development: `next dev`.
+- A build, schema check, or mock regression does not prove a real provider
+  purchase, renewal, storage policy, or production rollout.

@@ -1,6 +1,6 @@
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
-import { pruneVersionsBestEffort } from "@/lib/versions";
+import { createWorkspaceVersion, pruneVersionsBestEffort } from "@/lib/versions";
 import { validateApp } from "@/lib/ai-request";
 import type { FileData, Message } from "@/types/workspace";
 
@@ -24,7 +24,7 @@ export async function saveAiWorkspace(args: {
         data: { fileData: fileData as never, messages: args.messages as never, revision: { increment: 1 } },
       });
       if (!updated.count) throw new Error("Workspace changed. Reload before retrying. No credits were deducted.");
-      if (before.fileData) await tx.workspaceVersion.create({ data: { workspaceId: args.workspaceId, fileData: before.fileData as never, summary: args.summary.slice(0, 120) } });
+      if (before.fileData) await createWorkspaceVersion(tx, args.workspaceId, before.fileData, args.summary);
       workspace = { id: args.workspaceId, revision: before.revision + 1 };
     } else {
       workspace = await tx.workspace.create({ data: { organizationId: args.orgId, createdById: args.userId, fileData: fileData as never, messages: args.messages as never, title: args.title }, select: { id: true, revision: true } });
@@ -35,7 +35,7 @@ export async function saveAiWorkspace(args: {
     const org = await tx.organization.findUniqueOrThrow({ where: { id: args.orgId }, select: { credits: true } });
     args.signal.throwIfAborted();
     return { workspaceId: workspace.id, revision: workspace.revision, creditsRemaining: org.credits };
-  });
+  }, { timeout: 15000 });
   // Only cleanup remains outside the commit; it can never report a failed run.
   await pruneVersionsBestEffort(result.workspaceId);
   return result;

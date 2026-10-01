@@ -4,6 +4,10 @@ How Drevo connects a user's GitHub account (OAuth) and pushes generated apps
 to repositories. Covers setup, every endpoint, both push algorithms,
 divergence safety, and the security model.
 
+Last reviewed: **2026-10-01**. Workspace access is organization-membership based;
+credentials and push-target history are user-specific. Audit root causes:
+[10-audit-findings-and-fixes.md](./10-audit-findings-and-fixes.md).
+
 ## 0. Mental model
 
 ```
@@ -137,6 +141,10 @@ Output map (repo-relative paths): `package.json` (CRA `react-scripts 5`,
 `.env*`, `.next/`, `dist/`, `build/`, `.DS_Store`), `.env.example`
 (empty placeholders only — real secrets are never emitted).
 
+The shared builder validates source paths before mapping them into `src/`.
+Traversal segments, backslashes, control characters, drive-like paths, and
+`.git` segments are rejected. ZIP and GitHub therefore share the same guard.
+
 `handleExportZip` (`CodePanel.tsx`) zips exactly this map; the push route
 sends exactly this map. `BASE_DEPENDENCIES` is also reused for the Sandpack
 `customSetup.dependencies`.
@@ -155,7 +163,9 @@ Accepts `mode: "create" | "existing"` (defaults to `"create"`).
 2. Load DB user (`id`, `githubAccessToken`, `githubUsername`);
    missing → 404; no token → `401 {code: GITHUB_NOT_CONNECTED}`;
    `decryptToken` failure → `401 {code: GITHUB_TOKEN_INVALID}`.
-3. Load workspace by `{id: workspaceId, userId}` (ownership enforced);
+3. Load the saved workspace and require membership in its organization;
+   `createdById` is attribution, not exclusive access. All members may push
+   using **their own** saved credentials;
    `parseFileData()` guard → 400 when empty.
 4. `buildProjectFilesFromFileData()` → caps: 300 files, 8 MB total.
 
@@ -169,7 +179,7 @@ flowchart TD
   B --> T[POST git/trees base_tree HEAD]
   T --> CM[POST git/commits parents HEAD]
   CM --> R[PATCH git/refs non-forced]
-  R --> DB[(Save repoUrl/fullName/branch/pushedFiles)]
+   R --> DB[(Record exact user/project/repo/branch target)]
 ```
 
 - Step 1 records `createdRepo` so later failures can report
@@ -194,18 +204,27 @@ flowchart TD
 4. Read HEAD commit + tree. Create blobs for current files, then the
    **identical-content early-out**: compare blob SHAs against the
    recursive HEAD tree with deletions applied — equal →
-   `{unchanged: true}`, workspace timestamps refreshed, no commit.
+    `{unchanged: true}`, target tracking refreshed, no commit.
    (Blob SHAs are content-addressed, so recreating identical blobs is
    harmless and no ref is touched.)
-5. Tree = current files overlaid on `base_tree` + deletion entries
-   (`sha: null`) for paths in stored `githubPushedFiles` absent now.
+5. Load `GithubPushTarget` for the exact `(workspaceId, userId,
+   repoFullName.toLowerCase(), branch)` key. Tree = current files overlaid
+   on `base_tree` + deletion entries (`sha: null`) for paths in **that target's**
+   `pushedFiles` absent now. A new target has no previous deletion list.
    Foreign files (never pushed by Drevo) survive via `base_tree`.
 6. Commit `parents: [HEAD]` → `updateRef force: false`. A 422 here means
    HEAD moved underneath us → `409 {code: BRANCH_DIVERGED,
    "This branch changed on GitHub…"}`. No retry, no force, no overwrite.
-7. Success saves `githubRepoUrl/fullName/branch/lastPushedAt` +
-   `githubPushedFiles` (current paths) and returns
-   `{repoUrl, fullName, branch}`.
+7. Success upserts that `GithubPushTarget` (repo URL, current paths,
+   timestamp) and returns `{repoUrl, fullName, branch, trackingSaved}`.
+   Local tracking failure after a remote success returns
+   `trackingSaved: false`, not a false remote-push error.
+
+Legacy `Workspace.githubPushedFiles` and global link columns are kept in the
+database but are **not** used as deletion authority or assigned to a guessed
+user/target. On reload, the current user's latest target supplies the link used
+by quick Update. The first push to a target cannot safely delete files known
+only to legacy global history; review leftover paths on GitHub if necessary.
 
 ### 4.4 Error-code contract (both modes)
 
@@ -215,6 +234,13 @@ flowchart TD
 | `GITHUB_TOKEN_INVALID` | 401 | Rejected/decrypt-failed | Flip to disconnected, prompt reconnect |
 | `REPO_CREATED_PUSH_FAILED` | 500 | Repo exists, upload incomplete | Amber box + repo link + retry-into-repo |
 | `BRANCH_DIVERGED` | 409 | HEAD moved mid-push | Safe message, push again after review |
+| No credential code | 403 | Repository permission denied | Check repo permissions; do not assume token invalid |
+| Rate-limit response | 429 | GitHub rate limit | Wait; do not clear a valid connection |
+
+Rate-limit classification happens before permission/credential classification.
+A successful response with `trackingSaved: false` prompts a warning in both
+dialog and quick Update. Inspect the repository before retrying; a second
+create request can encounter a name collision because the first push succeeded.
 
 Push costs **no credits** — it is file transfer, not AI work.
 
@@ -223,7 +249,7 @@ Push costs **no credits** — it is file transfer, not AI work.
 ### `lib/github-push-client.ts`
 
 ```ts
-pushToGithub(payload): {ok, result{repoUrl, fullName, branch, unchanged?}}
+pushToGithub(payload): {ok, result{repoUrl, fullName, branch, unchanged?, trackingSaved?}}
                       | {ok:false, error{message, code?, repoUrl?, fullName?}}
 listGithubRepos(search): GithubRepo[]   // GET /api/github/repos
 listGithubBranches(fullName): string[]  // GET /api/github/branches
@@ -277,8 +303,21 @@ state) → CodePanel → SandpackInner`.
 
 - Token encrypted (AES-256-GCM, SHA-256-normalized key) at rest; httpOnly
   OAuth `state` cookie validated; all Octokit calls server-side.
-- Ownership checks on every read/write (`{id, userId}` / owner == username).
-- `repoName` / branch validation; 300-file / 8 MB caps.
+- Workspace organization membership checks plus repo owner == connected username.
+- Personal OAuth token and per-member/repository/branch deletion tracking.
+- `repoName` / branch / export-path validation; 300-file / 8 MB caps.
 - Never force push; divergence fails safe; secrets never emitted.
 - `POST /user/repos` deprecation warning (Octokit) targets March 2028 —
-  no action needed.
+  review against current provider guidance before a future integration update.
+
+## 7. Regression coverage and boundaries
+
+`scripts/test-security.cjs` executes the actual push route with mocked GitHub
+and Prisma. It checks new vs known targets, different member/branch keys,
+deletion isolation, rate-limit classification, and remote success despite local
+tracking failure. In-memory PostgreSQL tests enforce the target uniqueness.
+
+These tests do not push to a real repository or validate live OAuth permissions.
+Non-forced updates guard remote history, but this integration is not a distributed
+transaction with GitHub. Failed local tracking and simultaneous pushes still
+deserve repository review. Never run a live push just to validate documentation.

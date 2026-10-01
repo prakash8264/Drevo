@@ -1,76 +1,115 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Drevo — AI Website Builder
 
-## Getting Started
+Drevo turns a prompt into a React application with a live Sandpack preview.
+Users can iterate through chat, ask AI to fix preview errors, restore versions,
+export a ZIP, and push saved projects to their own GitHub repositories.
 
-First, run the development server:
+## Documentation
+
+Start with the [documentation index](./docs/README.md).
+
+- [Overview and stack](./docs/01-overview.md)
+- [Architecture, environment, and state management](./docs/02-architecture.md)
+- [Organization access and billing](./docs/09-multi-tenancy.md)
+- [Audit findings: causes, fixes, and remaining work](./docs/10-audit-findings-and-fixes.md)
+- [Text-patch history: implementation and safe rollout](./docs/11-text-patch-version-history.md)
+- [Troubleshooting](./docs/06-troubleshooting.md)
+
+## Main features
+
+- Gemini first-generation output; Gemini, Qwen, or Atria for follow-up edits.
+- Sandpack preview and source viewer; AI-assisted runtime-error recovery.
+- Organization-owned projects, subscriptions, and shared credits.
+- Clerk authentication, organization invitations, and organization checkout.
+- Checkpoint/text-patch version history with revision-checked, free restores.
+- ZIP export and user-owned GitHub OAuth; safe, non-forced pushes.
+- Light/dark themes and persistent multi-organization selection.
+
+## Local setup
+
+1. Install dependencies with `npm ci`. The `postinstall` script generates the
+   Prisma client in `lib/generated/prisma`.
+2. Configure the environment described in
+   [02-architecture.md](./docs/02-architecture.md#environment). Use a dedicated
+   development database and matching Clerk instance; never commit secrets.
+3. Review the migration history and apply pending migrations to that database
+   with `npx prisma migrate deploy`. Prisma CLI uses `DIRECT_URL`; application
+   queries use `DATABASE_URL`.
+4. Start `npm run dev` and open <http://localhost:3000>.
+5. Configure Clerk invitations, organization plans, and signed webhook delivery
+   for your environment. GitHub and the optional editing providers require their
+   own credentials.
+
+The host application uses Next.js **16.3.8**, React **19.2.8**, Prisma **7.10.0**,
+and PostgreSQL. Production builds use **webpack**, not Turbopack, to avoid the
+previous deployment-specific Google-font resolution failure.
+
+## Checks
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm test
+node node_modules/typescript/bin/tsc --noEmit --incremental false
+npx prisma validate
+npm run lint
+npm audit
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Do not run the standalone TypeScript check at the same time as a build: Next.js
+regenerates `.next/types`, which can cause temporary missing-file errors.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The standard regression suite is isolated: it uses mocks and in-memory
+PostgreSQL, not production credentials. Other scripts in `scripts/` are **not**
+automatically safe; see [the operational warnings](./docs/09-multi-tenancy.md#scripts-and-operational-safety).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Credit policy
 
-## Learn More
+| Plan | Allocation | App-listed monthly price |
+|---|---|---|
+| Free | One 10-credit trial per user, in the initial personal organization | $0 |
+| Starter | 50 credits per confirmed monthly paid period | $20 |
+| Pro | 150 credits per confirmed monthly paid period | $29 |
 
-To learn more about Next.js, take a look at the following resources:
+Additional organizations start with zero credits. Paid allowances are additive
+and deduplicated; unused credits roll over. Cancellation/downgrade does not
+subtract an existing balance. Successful saved AI work costs one shared credit;
+no-op edits, failed saves, GitHub pushes, exports, and restores do not.
+Clerk's configured plan price is authoritative for an actual purchase.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## October 2026 release and rollout
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The code includes the additive migration
+`prisma/migrations/20261001090000_security_billing_persistence/migration.sql`.
+It preserves balances and history, adds grant receipts/revisions/push-target
+tracking/AI leases, and marks existing users as already trial-allocated.
+Existing paid plans are recorded as a baseline to avoid re-awarding a historical
+period. Legacy global GitHub metadata is preserved but is not assigned to a
+guessed member/repository/branch.
 
-## Deploy on Vercel
+Before rollout, back up the intended database, review the migration, apply it
+with `npx prisma migrate deploy`, and deploy compatible application code. Do
+not reset the database, use `prisma db push` as a substitute, or replay real
+billing events as a test. Verify webhook delivery and renewals in a test
+organization. Paid or unresolved subscriptions block organization deletion.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Text-patch history adds the separate additive migration
+`prisma/migrations/20261001130000_text_patch_version_history/migration.sql`.
+It preserves legacy snapshots and current full project data. Apply it before
+using the new history code; do not run old history readers/pruners alongside
+delta-writing code or roll back to them after deltas exist. See the
+[history rollout guide](./docs/11-text-patch-version-history.md#7-migration-and-rollout).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+At the end of the fix session, 58 regression tests, TypeScript, Prisma
+validation, the production build, and changed-file ESLint passed. During the
+documentation refresh on **2026-10-01**, all 58 tests passed again and
+`npm audit` reported zero vulnerabilities. Repository-wide lint still had
+pre-existing errors in the animated background and an unused homepage import;
+see the [validation record](./docs/10-audit-findings-and-fixes.md#validation-record).
 
-## Security/billing release (October 2026)
-
-Before deploying the updated application, back up the database and apply the
-additive `20261001090000_security_billing_persistence` migration with
-`npx prisma migrate deploy` against the intended `DIRECT_URL`. Do not use
-`prisma db push`, reset the database, or replay real billing events to test it.
-The migration preserves all balances/history and marks existing users as
-already trial-allocated. It records the existing paid plan as a baseline so
-its pre-release billing period is not credited a second time.
-
-- New users receive one 10-credit allocation in their initial personal
-  organization. Extra organizations start with zero credits; deleting an
-  organization does not reset the user's trial eligibility.
-- Active non-trial monthly paid periods and verified `paymentAttempt.paid`
-  periods receive a deduplicated additive allowance. Existing credits roll
-  over; cancellation/downgrade never subtracts them. Annual allowances are
-  intentionally not enabled for the monthly-only plans.
-- Configure the Clerk webhook for subscription, subscription-item,
-  `paymentAttempt.paid`, membership created/updated/deleted, and organization
-  created/deleted events. Failures return 5xx for provider retries.
-- Paid/unresolved subscriptions block organization deletion; cancel billing
-  and wait for the subscription to end first.
-- Legacy GitHub metadata remains untouched, but deletion history is not
-  imported into a guessed member/repository/branch. Exact-target tracking
-  starts with the next successful push.
-
-Run `npm test`, `npx prisma validate`, the TypeScript check and `npm run build`.
-The regression suite uses mocks plus Prisma's installed in-memory PostgreSQL
-dependency, never production credentials. Dependency overrides patch Prisma's
-transitive packages without changing the Prisma major version.
-
-### Provider configuration still needs verification
-
-Clerk's default `org:admin` role represents both local OWNER and ADMIN. The app
-guards its checkout and subscription controls as OWNER-only, but this alone
-does not restrict Clerk's own billing interfaces/APIs. Verify provider billing
-permissions (or configure a distinct owner role) before claiming provider-level
-OWNER-only billing. Verify real webhook delivery/renewal behavior and Supabase
-Storage authorization policies in a test organization before production rollout.
+**Implemented does not mean deployed.** No live migration or deployment was
+performed in the fix session, and live rollout status was not checked during
+this documentation update. Provider-level OWNER-only billing, real billing
+lifecycle behavior, and Supabase Storage authorization still require separate
+verification. Clerk's default `org:admin` represents both local OWNER and ADMIN;
+the app's checkout preflight alone cannot enforce that distinction in Clerk's
+own billing interfaces.

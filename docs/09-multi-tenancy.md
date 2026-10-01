@@ -1,156 +1,235 @@
-# 09 — Multi-Tenancy (organizations)
+# 09 — Multi-Tenancy, Membership, and Billing
 
-Org-based multi-tenancy. `Organization` owns workspaces, shared credits,
-and plan. `User` is identity + per-user GitHub token only.
+Last reviewed: **2026-10-01**. Organization data is local; identity/membership/
+billing authority is Clerk. This is the **B-variant** architecture, not separate
+custom payment checkout. Root causes and regression evidence: [10](./10-audit-findings-and-fixes.md).
 
-## Models
+## Ownership and models
 
-- `Organization { id, name, slug?, plan (free|starter|pro), credits }`
-- `OrganizationMember { organizationId, userId, role: OWNER|ADMIN|MEMBER }`
-  (`@@unique([organizationId, userId])`)
-- `User { clerkId, activeOrganizationId?, memberships, createdWorkspaces }`
-  (no `credits`/`plan` — dropped in contract migration)
-- `Workspace { organizationId!, createdById! }`
-  (legacy `userId` dropped in contract migration)
+| Model | Ownership / purpose |
+|---|---|
+| `Organization` | Name/Clerk link, plan, shared balance, billing baseline; owns projects and grant receipts |
+| `OrganizationMember` | Unique local user/org membership with OWNER/ADMIN/MEMBER role |
+| `User` | Clerk identity, persisted selection, one-time trial marker, encrypted personal GitHub credentials; no plan/credits columns |
+| `Workspace` | Required org and creator attribution, files/history/messages, revision |
+| `OrganizationCreditGrant` | Unique receipt per org/plan/period; prevents duplicate allowance |
+| `GithubPushTarget` | Push history scoped to project/member/repository/branch |
 
-## Rules
+Leaving/removal does not change project ownership or delete projects created by
+that person. Membership, not `createdById`, determines current project access.
 
-1. All members see/open/edit/AI on every org workspace. No project-level ACLs.
-2. Only OWNER/ADMIN create (enforced in `gen-ai-code` create branch) or
-   delete (`deleteProject` server action). 403 otherwise.
-3. Credits are `Organization.credits`, success-only deduct, guarded by
-   `updateMany({ where: { id, credits: { gte: 1 } } })` so concurrent spends
-   can't overspend (see `scripts/test-credit-concurrency.ts`).
-4. Workspace routes authorize via `workspace.organizationId` + membership
-   (`findFirst({ id, organizationId: { in: myOrgIds } })`), never bare
-   `findUnique({ id })`. Create/list use the active org.
-5. `User.activeOrganizationId` persists the switcher selection; always
-   re-validated against `OrganizationMember`. Switch via
-   `GET /api/orgs` + `POST /api/orgs/switch`.
-6. GitHub OAuth stays per-user; MEMBERs push with their own token.
-7. Member management: list/add-by-email/role/remove under
-   `/api/orgs/members/*`; removals and self-leave ask for confirmation
-   first; sole-OWNER demote/remove blocked (409);
-   no self role-changes; ADMINs can't touch OWNERs.
-    Clerk sends organization invitation emails for new and existing users.
-    Create orgs from the switcher's New organization row
-    (`POST /api/orgs/create`, caller becomes local OWNER and Clerk admin via
-    `createdBy`). Select only after Clerk setup succeeds; preserve the saved
-    organization but return 503 if setup fails, so selecting it can retry setup.
-8. Delete org: OWNER-only, others-removed-first (409 otherwise), cascade
-   wipes workspaces/versions, active pointers repaired.
-9. Billing: organization plan is source of truth. Clerk owns organization
-   checkout; app checkout requires OWNER and matching Clerk/app organization
-   context. User-plan slugs are not used for organization plan badges.
+## Role matrix
 
-## Scripts
+| Operation | OWNER | ADMIN | MEMBER |
+|---|---|---|---|
+| View/edit org projects, use AI/shared credits | Yes | Yes | Yes |
+| Export/push a project with own GitHub account | Yes | Yes | Yes |
+| Create/delete org projects | Yes | Yes | No |
+| List members | Yes | Yes | Yes |
+| Invite/change ADMIN or MEMBER/remove non-owner | Yes | Yes | No |
+| Explicit full membership Sync | Yes | Yes | No |
+| Leave organization | Unless sole OWNER | Yes | Yes |
+| App subscription checkout controls | Yes | No | No |
+| Delete organization | With lifecycle checks | No | No |
 
-- `scripts/backfill-orgs.ts` — post-contract verifier (no-op).
-- `scripts/verify-orgs.ts` — integrity harness (membership, OWNER,
-  workspace linkage, isolation spot-check).
-- `scripts/test-credit-concurrency.ts` — atomic-guard proof.
-- `scripts/replay-webhooks.ts` — Svix-signed local replay of every handled
-  event type (needs `npm run dev`).
-- `scripts/reconcile-clerk-*.ts` — Clerk↔Prisma reconciliation (dry-run/apply).
+No self-role changes; ADMIN cannot change/remove OWNER. The ADMIN/MEMBER role
+endpoint does not implement ownership transfer. The sole OWNER cannot leave or
+be removed through the app. Current external Clerk changes can revoke/demote even
+an OWNER; sync must not resurrect access just to preserve a local owner invariant.
 
-## Webhook lessons
+`toClerkRole`: local OWNER/ADMIN → `org:admin`, MEMBER → `org:member`.
+Inbound admin → ADMIN, except an **existing OWNER** stays OWNER while the current
+provider role is still admin. There is no automatic "first admin becomes OWNER"
+in authoritative reconciliation.
 
-- `svix@2.x verify()` returns `undefined` on success (v1 returned the
-  payload in the original integration). Use the parsed body after verifying
-  the original raw request body, without JSON re-serialization.
-  Getting this wrong 500s every event (74% error rate seen in production).
-- Production builds use webpack (`next build --webpack`): Vercel's Turbopack
-  build shim broke `next/font/google` resolution
-  (`@vercel/turbopack-next/internal/font/google/font` import-map failure),
-  failing deploys while local Turbopack builds passed. Dev stays on Turbopack.
+## Selection and fast switching
 
-## Migrations
+- `User.activeOrganizationId` stores selection, but is validated against local
+  membership every use; it is not an authorization grant.
+- Existing user `checkUser()` uses a one-DB-read fast path. It does not fetch a
+  provider subscription or re-list provider membership every page load.
+- Header passes its organization list to the switcher without an extra list fetch.
+- `/api/orgs/switch` checks membership, persists pointer, and returns Clerk link.
+  Client `setActive` coordinates provider context; avoid redundant route refreshes.
+- Failed activation/repair stays visible and rolls back selection. Selecting an
+  already-highlighted org still activates Clerk if contexts drift.
+- Conditional pointer repairs cannot overwrite a newer explicit switch.
+- Empty orgs are valid selections. Project count never chooses a subscription.
+- Opening an existing workspace loads **its org** role/balance, even if the
+  navbar selection differs. Credit events are org-scoped to avoid leaking this
+  display update to another organization's navbar.
 
-- `..._add_organizations_expand` — nullable org cols + tables.
-- `20260928120000_contract_remove_user_ownership` — required cols,
-  dropped `User.credits/plan`, `Workspace.userId` (manual dir: `migrate dev`
-  refuses non-TTY shells, SQL via `migrate diff --from-config-datasource`).
-- `20260928130000_org_clerk_id` — `Organization.clerkOrgId @unique` (nullable).
+## Creation and legacy repair
 
-## Clerk B-variant wiring
+`ensurePersonalOrganization` locks the user row and rechecks membership before
+creating the initial personal organization. The same transaction claims
+`trialCreditsGrantedAt`, creates org/local OWNER, and selects it. A first eligible
+user receives 10 credits; the marker survives later organization deletion.
+Joining an existing organization does not add trial credits to that org; the
+allocation happens only through eligible initial personal-org provisioning.
 
-- `lib/clerk.ts` — role maps (`org:admin`↔OWNER/ADMIN, `org:member`↔MEMBER),
-  plan map with free fallback, upgrade-only top-up.
-- Backfill: `scripts/backfill-clerk-orgs.ts` (no slug — dashboard slugs toggle
-  is off; `organization_slugs_disabled` otherwise).
-- New signups auto-create their Clerk org in `ensurePersonalOrganization`
-  (Prisma-first, Clerk-second, with `createdBy` to add the actual user as admin).
-- All app-created Clerk orgs carry private `drevoOrganizationId` metadata;
-  `organization.created` links only that exact Prisma row, without guessing
-  another unlinked organization of the creator.
-- `POST /api/webhooks/clerk` (svix, `CLERK_WEBHOOK_SECRET`): subscription.*
-  → plan + top-up via shared `syncOrgPlan` in `lib/billing.ts`; the payer
-  org id is resolved across payload shapes (`payer.organization_id`,
-  `organization_id`, `organization.id`) and every skip path logs, so missed
-  syncs are visible instead of silent; membership created/invitation accepted
-  → upsert (new-only, never demotes OWNER); membership deleted → remove +
-  pointer repair; organization.created → link creator's unlinked org.
-- Manual plan fallback: `POST /api/orgs/billing/sync` reuses `syncOrgPlan`
-  for the active org (Sync plan button in the pricing modal) — heals missed
-  or lagging subscription events without touching Clerk state.
-- Invites: members dialog → `POST /api/orgs/members/add` →
-  `createOrganizationInvitation` (Clerk emails, absolute `redirectUrl` derived
-  from request origin or `NEXT_PUBLIC_APP_URL` +
-  `/accept-invitation?organization_id=<clerkOrgId>`).
-- The acceptance page lets Clerk's prebuilt components own authentication,
-  preserving the target org on return. It accepts only a matching pending
-  invitation; older links without a target show named invitations to choose
-  from. There is no timed redirect and failed acceptance stays visible.
-- `POST /api/orgs/invitations/complete` verifies the authenticated user's
-  membership with Clerk, transactionally upserts the Prisma mirror (preserving
-  OWNER), and selects that org. The client sets the Clerk active org before
-  reloading `/projects`. Webhook timing does not gate access after acceptance.
-- Empty organizations remain valid selections. User sync and webhook replays
-  must not switch away merely because an org has no projects.
-- Run `node scripts/test-organization-invitation.cjs` for isolated acceptance,
-  authorization, and raw-body webhook regressions (no live users or DB writes).
-- Removal: Clerk-first (`deleteOrganizationMembership`), Prisma after,
-  webhook self-heals half-failures.
-- Checkout: both buttons `for="organization"` (bills active Clerk org);
-  `OrgSwitcher` moves Clerk active org + Prisma pointer together via
-  `setActive`. Both pricing surfaces use `OrganizationCheckoutButton`, which
-  calls `POST /api/orgs/billing/checkout` before opening Clerk's drawer. The
-  preflight checks authenticated OWNER, persistent app selection, session
-  org ID, and client org ID; the client re-checks Clerk after awaiting it.
-  This gates app checkout, not direct access to Clerk billing outside the app.
-- Failed activation for a local OWNER invokes `POST /api/orgs/repair` once.
-  It may provision an unlinked counterpart or add the verified OWNER as
-  `org:admin` to a zero-member legacy Clerk org. It never restores a removed
-  member in a populated org, changes plans/credits, or moves subscriptions.
-  Failed repair/activation rolls back the app pointer and shows an error;
-  creation must not show a success toast after failed activation. Selecting
-  the already-highlighted org also activates Clerk when the contexts differ.
-- Org plans: Starter org plan `cplan_3K2DXlsyW4SPI7QFY7WGnwgTvxe`
-  (dashboard Key `starterorg`, $20/mo, 50 credits), Pro org plan
-  `cplan_3K2J6Vgaiww60XSxqKHGcSwGvGa` (dashboard Key `proorg`, 150 credits).
-  `toDrevoPlan` maps the Clerk slugs `starterorg`/`proorg` → Drevo plans;
-  the header passes the synced `Organization.plan` into the pricing modal so
-  the Active badge does not depend on user-plan `has()` checks.
-- Billing access: only the org OWNER sees paid checkout buttons (header,
-  landing, and modal fallback via `/api/orgs/members` role). Fallback roles are
-  reloaded on Clerk org changes, and checkout authorization is checked again
-  server-side. ADMIN/MEMBER get a disabled Owner-only button. Free stays the
-  default with no checkout.
+Additional organizations created through `/api/orgs/create` receive **zero**
+credits. Clerk provisioning uses the actual creator's Clerk user ID as `createdBy`
+and private `drevoOrganizationId` metadata. Failure preserves local data but
+does not report successful provider setup/activation.
 
-## Organization switching performance
+The OWNER-only repair endpoint:
 
-- `checkUser` uses the session identity and one Prisma read for established users.
-  Clerk profile fetching and personal-org provisioning are only needed for new
-  users or repairing missing context. Membership reconciliation runs through
-  invitation completion, webhooks, or explicit Sync, not every page render.
-- The header passes its membership list directly to the switcher, avoiding an
-  extra `/api/orgs` request. Active-org resolution is cached within each server
-  render only, never across users or requests.
-- Switching requires one membership lookup (including the Clerk org ID) and
-  one active-pointer update. Clerk `setActive` refreshes the Next.js route;
-  the switcher must not trigger a second refresh on success.
-- Run `node scripts/test-org-switch.cjs` for query-budget, authorization and
-  failed-activation rollback checks.
-- Run `node scripts/test-org-setup.cjs` for creator membership, empty-org
-  repair, creation failure handling, and checkout mismatch prevention.
-  Fixtures are isolated: no live DB writes, memberships, or purchases.
+1. Requires verified membership in the exact local target.
+2. Recovers an existing counterpart by exact private metadata before creating one.
+3. May add the verified local OWNER to a zero-member legacy Clerk counterpart.
+4. Refuses to recreate removed membership in a **populated** Clerk org.
+5. Never moves subscriptions or changes/transfers balances.
+
+This is targeted recovery, not a globally race-proof provisioning system.
+Concurrent repair/backfill and partial failures remain an operational caution.
+
+## Invitations and authoritative reconciliation
+
+Clerk sends invitation email; there is no separate mail provider. Invite roles
+are ADMIN/MEMBER. The manager's current provider admin access is verified.
+
+Acceptance preserves the requested org through Clerk auth, accepts only a
+matching pending invitation, and shows named choices for older untargeted links.
+No timed redirect hides acceptance failures. Completion verifies **current**
+Clerk membership, mirrors it, and selects that org before client activation.
+
+`syncClerkMemberships` is shared by membership/invitation webhooks, completion,
+explicit Sync, and invite self-healing. It locks the local org row, paginates
+current provider members, updates roles, removes absent members in scope, and
+conditionally repairs invalid selection. A provider failure rolls back instead
+of being interpreted as an empty list. Ordinary background sync does not replace
+another valid selected org; explicit completion requests activation.
+
+Role/removal mutations are **Clerk-first**, then Prisma under the same org lock.
+There is no distributed transaction across the two services: a provider success
+followed by local failure needs a later webhook/explicit reconciliation. Delayed
+events re-read current provider truth rather than restoring their old access.
+
+## Credit policy and billing lifecycle
+
+| Plan | Allocation | Purchase configuration |
+|---|---|---|
+| Free | 10-credit trial once per user in initial personal org; not monthly | No checkout |
+| Starter | Add 50 per confirmed eligible monthly paid period | App price $20/month; configured Clerk org plan |
+| Pro | Add 150 per confirmed eligible monthly paid period | App price $29/month; configured Clerk org plan |
+
+App plan IDs/slugs live in `lib/constants.ts` and must match the intended Clerk
+instance. `starterorg`/`proorg` map to Starter/Pro; exact supported aliases are
+accepted, arbitrary substring matches are not. Actual checkout price comes
+from provider configuration.
+
+`syncOrgPlan` locks the organization, fetches subscription state, and selects
+eligible active/past-due/canceled items whose period has started and not ended,
+preferring the recognized higher tier and newer period. Future/ended entries
+are not the fallback. Eligibility for **displayed access** is separate from
+eligibility for a **new credit grant**.
+
+Grant rules:
+
+- Active, non-trial, monthly paid item with a valid period start; or eligible
+  historical period from a verified `paymentAttempt.paid` event.
+- Unique receipt key `${plan}:${periodStart}` within the organization.
+- Insert receipt and increment balance in the same transaction. Duplicate
+  receipt → no increment. Never overwrite balance from an old read.
+- `billingBaselineAt`/`billingBaselinePlan` prevent duplicate pre-release awards;
+  historical receipts are recorded with zero credits where appropriate.
+- Unused balance rolls over. Cancellation/downgrade changes mirrored plan, not
+  balance. It is **not** a monthly balance reset or clawback.
+- Annual allocations are not implemented for these monthly-only app plans.
+- Clerk 404/429/5xx is a retryable sync failure, **not** proof of Free.
+
+Both AI routes spend one shared credit in a guarded transaction only when valid
+work is saved. A saved partial edit can cost one credit; a no-op is free.
+Project/version writes, revision increment, and deduction roll back together.
+Balance returned to the client comes from inside the transaction.
+
+## Checkout boundary
+
+`OrganizationCheckoutButton` calls `/api/orgs/billing/checkout` before opening
+Clerk organization checkout (`for="organization"`). Server preflight requires
+local OWNER and agreement among persistent Prisma selection, linked Clerk org,
+session org, and client org. Client context is rechecked after awaiting.
+
+`PricingModal` prefers mirrored org plan and explicitly scoped `org:...` claims
+as a display fallback. The landing page's remaining unscoped display fallback
+is documented as deferred; server checkout authorization is separate.
+
+**Provider-level OWNER-only billing is not established by the app gate.** Clerk's
+default `org:admin` represents both OWNER and ADMIN. Verify/configure Clerk's own
+billing permissions or design a distinct provider owner role before making that
+guarantee. This update did not change provider roles/configuration.
+
+## Webhooks
+
+Endpoint: `/api/webhooks/clerk`; secret: `CLERK_WEBHOOK_SECRET`.
+
+| Event | Handling |
+|---|---|
+| `subscription.*`, `subscriptionItem.*` | Current authoritative plan/grant sync |
+| `paymentAttempt.paid` | Current sync plus valid delayed paid-period data from signed payload |
+| `organizationMembership.created/updated/deleted` | Re-read provider membership; never trust event ordering/old role alone |
+| `organizationInvitation.accepted` | Current membership reconciliation when user/org can be resolved |
+| `organization.created` | Link exact private local ID only |
+| `organization.deleted` | Verify current provider 404 before local cascade |
+
+Svix v2 `verify()` validates the original raw request text and returns no parsed
+payload. Parse **after** verification. Global bot checks exempt this exact path;
+unsigned/invalid deliveries still fail. Processing errors return 5xx for retries.
+Unextractable payer IDs are logged/skipped; inspect provider payloads in test
+delivery rather than assuming a grant was processed.
+
+## Organization deletion
+
+The app requires local OWNER and no other local/provider members. For linked
+orgs, verify current provider access and a successfully read resolved subscription;
+active/unresolved paid items block deletion. Cancel and wait for the billing
+period to end. Delete Clerk org first, then local org in the guarded flow.
+A confirmed provider-org 404 permits idempotent local cleanup.
+
+Org deletion cascades its projects/versions/grants/push targets. User accounts
+remain, and pointers become null or switch to another membership. It intentionally
+deletes that organization's balance/data; cancellation/downgrade preservation
+does **not** promise preservation after an explicit destructive org deletion.
+
+## Migrations and rollout
+
+| Migration | Purpose |
+|---|---|
+| `20260928084948_add_organizations_expand` | Organization/member tables and nullable ownership transition fields |
+| `20260928120000_contract_remove_user_ownership` | Required project org/creator, remove user plan/credits and legacy project user ownership |
+| `20260928130000_org_clerk_id` | Nullable unique provider link |
+| `20261001090000_security_billing_persistence` | Trial marker, zero default, paid baseline, revisions, grants, target history, leases |
+| `20261001130000_text_patch_version_history` | Legacy-preserving checkpoint/delta fields, counts, same-workspace base FK and storage constraints; see [11](./11-text-patch-version-history.md) |
+
+The October migration preserves accumulated balances/history; it does not reset
+or transfer accepted credits. Existing users are marked trial-allocated. Legacy
+global GitHub history is not assigned to a guessed member/target; exact-target
+tracking starts with the next successful push.
+
+Back up, review target/environment, apply pending migrations using
+`npx prisma migrate deploy` with intended `DIRECT_URL`, then deploy compatible
+code. Avoid old/new application writers racing during the credit-policy cutover.
+Do not reset, `db push` over the history, or replay real payments for testing.
+Live application/migration/provider status was not verified in this doc update.
+
+## Scripts and operational safety
+
+**Isolated suite:** `npm test` runs seven CJS test files without `.env` or network
+provider/production DB writes. It includes in-memory PostgreSQL preservation,
+unique-grant, rollback, revision, target, lease, and patch-history checks.
+
+**Operational utilities are different:**
+
+| Script | Caution |
+|---|---|
+| `reconcile-clerk-apply.ts` | Requires explicit `--apply`; linked orgs only, Clerk → Prisma; changes local access, never recreates provider memberships |
+| `reconcile-clerk-dryrun.ts` | Review-only report; inspect source/assumptions before relying on results |
+| `backfill-clerk-orgs.ts` | Creates real provider orgs/links; do not assume safe under partial failures or concurrent runs |
+| `replay-webhooks.ts` | Uses configured signing credentials and real identifiers; localhost target does not make effects safe |
+| `test-credit-concurrency.ts` | Creates/deletes a real temporary organization; not in isolated `npm test` |
+| `verify-orgs.ts` | Read-oriented integrity report with known false-positive/false-PASS assumptions; not sole proof of correctness |
+| `backfill-orgs.ts` | Legacy post-contract verifier; inspect before use |
+
+Never casually run these against live credentials. Back up and use explicit test
+users/orgs if an operational apply is separately approved.

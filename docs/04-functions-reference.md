@@ -1,291 +1,209 @@
-# 04 — Functions reference (which function does what)
+# 04 — Functions and API Reference
 
-Conventions: `401` = no Clerk session, `402` = out of credits, credits cost
-1 per successful AI run on all plans. AI internals in depth:
-[08-ai-agent-deep-dive](./08-ai-agent-deep-dive.md). GitHub in depth:
-[07-github-integration](./07-github-integration.md).
+Last reviewed: **2026-10-01**. Client IDs are not authority: routes/actions derive
+the user from Clerk and validate organization membership on the server.
 
-## Generation API — `app/api/gen-ai-code/route.ts`
+## Workspace and project actions
 
-- `sseEvent(type, payload)` — `(type: string, payload: unknown): string`.
-  Returns `"data: " + JSON.stringify({type, ...payload}) + "\n\n"`.
-- `extractThoughtLabel(text)` — pulls a `**Bold**` heading (regex
-  `/\*\*([^*]{4,60})\*\*/`) else first sentence; only 8–80 chars else
-  `null`. Keeps status pills compact.
-- `validateDependencies(deps)` — `Promise.all` over entries:
-  `fetch registry.npmjs.org/<pkg>/latest` with `AbortSignal.timeout(1500)`;
-  keeps `res.ok` only. Hallucinated packages vanish silently.
-- `trimHistory(messages)` — `length <= 10` → as-is, else
-  `[first, ...last8]`. Bounds prompt tokens while keeping the original ask.
-- `buildContents(messages, fileData)` — maps roles (`assistant→model`);
-  user parts get the image hint prepended when `imageUrl` exists; the last
-  user message additionally gets `"Current project files:\n" +
-  JSON.stringify(fileData)`.
-- `POST(request)` — guards 401/400/404, then **Arcjet screen**
-  (`aj.protect`: per-user bucket + `detectPromptInjectionMessage` on the
-  last user text; denial → free `429 {message, code:
-  REFUSED|RATE_LIMITED}`, no credit, no AI call), then 402, then
-  `ReadableStream.start { safeEnqueue/safeClose, abort listener,
-  sleepOrAbort/backoffMs }`:
-  1. `runStream(modelName)` (max 3 attempts): `generateContentStream`
-     (same config); per-attempt fresh buffer; at-call vs mid-stream shed
-     logged (`[gen-ai-code] attempt n/3 failed (…)`);
-     overload-shaped throw + attempts left → `status "Model busy —
-     retrying… (n/3)"` + backoff (2/4/8 s + jitter, abort-aware) and
-     re-issue from scratch; abort → `null`; other errors rethrow.
-     Primary `gemini-3.5-flash` first, then optional `GEMINI_FALLBACK_MODEL`
-     (empty = disabled) on overload exhaustion; `null` → silent return.
-  1. `generateContentStream({model: gemini-3.5-flash,
-     systemInstruction: SYSTEM_PROMPT, temperature: 0.7,
-     responseMimeType: "application/json",
-     thinkingConfig: {includeThoughts: true}})`.
-  2. `part.thought` → `status` (600 ms throttle); else append to
-     `accumulated`. Abort/close → stop silently.
-  3. `JSON.parse(accumulated)` fails → `error invalid JSON`, return
-     (finally closes once). `files` missing → `error`, return.
-  4. `status "Validating packages…"` → `validateDependencies` →
-     `newFileData {files, dependencies, title}`.
-  5. `status "Saving…"` → single `db.$transaction`: workspace
-     update (by `{id, userId}`) or create (title = AI title or first
-     80 chars of prompt) + optional pre-run `workspaceVersion.create`
-     (updates with prior files only) + `user credits decrement 1`.
-  6. `pruneVersions(workspaceId)` when updating; re-read credits;
-     `done{workspaceId, assistantMessage, fileData, creditsRemaining}`.
-  7. `catch`: `isQuotaError` → `error QUOTA_EXCEEDED`, else generic
-     `error`. No deduction on any failure. `finally safeClose()`.
-- `isQuotaError(err)` — regex on message:
-  `quota|exceed.*current quota|generate_content_free_tier|rate.limit|
-  rate_limit|429|resource exhausted`.
-- `getQuotaRetryAfter(message)` — parses `/retry in ([\d.]+)s/i` → ceiled
-  seconds or `null`.
-- `quotaErrorPayload(err)` — `{message (with ~retry countdown when known),
-  code: "QUOTA_EXCEEDED", retryAfter?}`.
-- `isOverloadedError(err)` — status 503 (or `statusCode`) / message match
-  (`unavailable|overloaded|high demand|try again later|capacity|503`) for
-  Google 503 UNAVAILABLE saturation (distinct from quota);
-  `overloadErrorPayload()` → free `{message, code: "MODEL_OVERLOADED"}`.
-  Mirrored in the improve route (plus AI SDK `statusCode`/cause unwrapping).
-- `SYSTEM_PROMPT` — exact-JSON contract (`assistantMessage/title/files/
-  dependencies`), React/Tailwind rules, `/App.js` entry, all-files-on-edit.
+| Function / file | Contract |
+|---|---|
+| `getWorkspaceUser(workspaceId?)` — `actions/workspace.ts` | Authenticated user plus org ID/name/role/plan/credits and GitHub connection boolean/username. A supplied workspace selects **its** authorized org context; otherwise use the validated active org. |
+| `getWorkspaceById(workspaceId)` — `actions/workspace.ts` | Validate ID, authenticate, load a membership-authorized project. Return files/messages/revision and current user's latest `GithubPushTarget` link fields; dates serialized. |
+| `getUserProjects()` — `actions/projects.ts` | Active-org projects, newest updated first; first prompt snippet, timestamps, message count. |
+| `deleteProject(workspaceId)` — `actions/projects.ts` | Validate exact ID; OWNER/ADMIN only. Delete filter includes project, org, and managing membership. Revalidate `/projects`; cascade project history/targets. |
+| `getVersions(workspaceId)` — `actions/versions.ts` | Validate ID and org access; membership-scoped version summaries, newest first, no file payloads. |
+| `restoreVersion(workspaceId, versionId, expectedRevision)` — `actions/versions.ts` | Validate IDs/revision, authorize, lock/reconstruct/check hashes, compare revision, record DB files as `Before restore`, replace full files and increment revision atomically. Return detail plus new revision. Free. |
 
-## Improve API — `app/api/improve/` (split modules; route orchestrates)
+These are callable server actions, not trusted internal helpers. Unauthorized
+reads redirect; invalid arguments/forbidden mutations can throw. There is no
+public `pruneVersions` action.
 
-- `errors.ts`: `getQuotaRetryAfter`, `collectErrorText` (nested
-  `cause`/`errors[]`/`lastError` + statuses), `isQuotaError` /
-  `quotaErrorPayload(err, label?)`, `isOverloadedError` /
-  `overloadErrorPayload(label?)` (500 mapped here: Zen gateway failures),
-  `MaxIterationsError(reason, detail?)`, `streamErrorText`.
-- `models/`: `gemini.ts` (`resolveGeminiModel(id?)`, `GEMINI_MODEL_ID`,
-  sentinel), `qwen.ts` (`resolveQwenModel`, `QWEN_MODEL_ID`, sentinel),
-  `atria.ts` (`resolveAtriaModel`, `ATRIA_MODEL_ID`, standard Chat
-  Completions via `@ai-sdk/openai-compatible` — no Responses adaptation,
-  sentinel), `index.ts` (`resolveImproveModel` allowlist,
-  `notConfiguredResponse`).
-- `agent-tools.ts`: `createImproveTools({files, dependencies, setSummary},
-  emitFilePatch)` → `{updateFileTool, addDependencyTool,
-  doneImprovingTool}` (`ImproveTools`); `execute` bodies identical to the
-  old inline tools.
-- `agent-prompts.ts`: `trimHistory`, `buildConversationContext`,
-  `buildFileContext`, `buildAgentInstructions({installedDependencies,
-  fileContext})`, `buildAgentInput({messages, imageUrl, userRequest})`.
-- `agent-finish.ts`: `validateDependencies` (improve-local copy, on
-  purpose), `diffPaths(current, base)`, `createFinishRun(args)` (transaction
-  + prune + re-read → returns done payload; route enqueues it).
-- `agent-run.ts`: `sleepOrAbort`/`backoffMs`, `runAgentWithRetries({model,
-  modelLabel, instructions, input, tools, abortSignal, resetRunState,
-  shouldStop, enqueue})` → `{steps, finalText, streamError} | null`
-  (max 3, `maxRetries: 0` — sole retry authority).
+## Organization helpers
 
-- Same `sseEvent` + quota trio as generation.
-- `trimHistory(messages)` — identical first+last8 rule.
-- `buildConversationContext(messages)` — trimmed history minus the last
-  user message (it arrives as `userRequest`) rendered as
-  `User:/Assistant:` lines; `""` when empty.
-- `validateDependencies(deps)` — identical npm check.
-- `MaxIterationsError(reason, detail?)` — thrown when the loop ends without
-  a `done_improving` call; `reason` names the cause (`steps` budget,
-  mid-stream `quota`/`overload` error part) for honest partial notes.
-  (Replaces the old error-string matching.)
-- `POST` — 401/404 as above; 400 unless `workspaceId + userRequest.trim()
-  + fileData.files`; 402 on no credits. Then the stream:
-  - Seeds `patchedFiles/patchedDependencies` from current `fileData`,
-    `finalSummary = ""`.
-  - `update_file.execute({path, code, reason})` — writes the local map,
-    emits `file_patch{path,code,reason}` immediately, returns confirmation.
-  - `add_dependency.execute({package, version="latest"})` — accumulates;
-    validated in `finishRun` before save.
-  - `done_improving.execute({summary})` — sets `finalSummary`; the
-    `hasToolCall("done_improving")` stop condition ends the loop at once.
-  - `fileContext` serializes all files (`// path\ncode`, `---`-joined)
-    into the instructions text (persona, constraints, package lists, 4-step
-    WORKFLOW, RULES — see 08 §2.3).
-  - `streamText({model, instructions,
-    prompt: agentInput, tools ×3, toolChoice: "required",
-    stopWhen: [isStepCount(12), hasToolCall("done_improving")],
-    abortSignal: request.signal, maxRetries: 0})` (AI SDK v7; `ai@7` +
-    `@ai-sdk/google@3` / `@openrouter/ai-sdk-provider@3`). `maxRetries: 0`
-    disables SDK-internal retries so the envelope below is the sole retry
-    authority (SDK retries silently multiplied requests against throttled
-    pools: 3 sub-attempts × 3 attempts). `resolveImproveModel` allowlist is
-    `"gemini" | "qwen" | "atria"` (anything else → Gemini); Atria resolves
-    via `models/atria.ts` (see module entries above).
-  - `POST` — 401/404 as above; 400 unless `workspaceId + userRequest.trim()
-    + fileData.files`; 402 on no credits. Then the stream: seeds
-    `patchedFiles/patchedDependencies` from current `fileData`,
-    `finalSummary = ""`; builds tools/prompts via the factories above;
-    `resolveImproveModel(editModel)` (+ `notConfiguredResponse` 400s);
-    `runAgentWithRetries({...})` (+ Gemini-only `GEMINI_FALLBACK_MODEL` on
-    overload exhaustion); outcome classified from `steps` (no
-    `done_improving` → `MaxIterationsError` with quota/overload taken from
-    a captured error part when present, else budget case); **no-op
-    short-circuit** (no changed paths and no dep changes → free `done`
-    with current `fileData` and pre-run credits, no transaction) else
-    `finishRun(finalSummary || finalText || "Done.", false)`.
-  - REFUSALS/NO-OP rule in instructions: secret/system-prompt asks, pure
-    questions, chit-chat, explicit no-change → immediate `done_improving`
-    with NO `update_file` calls and a `NO_OP: …` summary; never reveal or
-    paraphrase instructions.
-  - `catch`: quota → `QUOTA_EXCEEDED` error; `MaxIterationsError` →
-    changes ? `finishRun(partialNote, true)` with cause-honest note
-    (quota: names the rate limit; overload: names saturation; steps: current
-    text) at 1 credit, save failure falls back to free `MAX_ITERATIONS`
-    error : free error per reason (quota payload with countdown from detail
-    / overload payload / `MAX_ITERATIONS`); else generic `error`.
-    `finally safeClose()`.
+| Helper | Responsibility |
+|---|---|
+| `checkUser()` — `lib/checkUser.ts` | Request-local identity/context load, one-read fast path, profile provisioning only when needed; no billing top-up logic. |
+| `ensurePersonalOrganization(userId)` — `lib/org.ts` | Repair valid selection or serialize initial org creation under user-row lock. Claim `trialCreditsGrantedAt` once; provision Clerk counterpart with actual Clerk creator/private link metadata. |
+| `getActiveOrganization()` — `lib/org.ts` | Cached per request, authenticate and validate persisted selection against memberships; conditional pointer repair. |
+| `getMembershipForOrganization(id)`, `requireOrganizationRole(id, allowedRoles)` — `lib/org.ts` | Validate target ID, check caller membership/role rather than client role. |
+| `getClerk()` — `lib/clerk.ts` | Backend Clerk client. |
+| `toClerkRole(role)` / `toPrismaRole(role)` — `lib/clerk.ts` | OWNER/ADMIN → `org:admin`; MEMBER → `org:member`; inbound admin → ADMIN unless sync preserves an existing authorized OWNER. |
+| `toDrevoPlan(slug)` — `lib/clerk.ts` | Supported exact Free/Starter/Pro names and org aliases, unknown → Free; no substring grant of a paid tier. |
+| `syncClerkMemberships(clerkOrgId, clerkUserId?, activate = false)` — `lib/membership-sync.ts` | Paginate current provider membership under org-row lock; upsert users/roles, remove missing scoped members, repair revoked selection. Return counts/org ID, or null if unlinked. Optional activation is used for invitation completion. |
+| `subscriptionOrgId(data)` — `lib/billing.ts` | Extract payer org from `payer.organization_id`, `organization_id`, or `organization.id`. |
+| `syncOrgPlan(clerkOrgId, paidPeriods = [])` — `lib/billing.ts` | Authoritative subscription selection and unique additive grants; return `{plan, credits, updated}` or null if unlinked. Provider failures throw. Historical paid periods come from verified payment events, not a public client input. |
 
-## GitHub server — routes + `pushToExisting`
+## Organization APIs
 
-- `connect GET(request)` — Clerk guard; `newOAuthState()` →
-  `buildAuthorizeUrl(state)`; sets httpOnly `github_oauth_state` (+
-  `github_workspace_id`) cookies (lax, 10 min, secure in prod); 302 to
-  GitHub; 500 when OAuth env missing.
-- `callback GET(request)` — Clerk guard; validates `code/state`/cookie;
-  `failRedirect()` (log `[github/callback]`, clear cookies,
-  `?github=error`) on mismatch; token exchange POST; `users.getAuthenticated`;
-  stores encrypted token + username + userId + timestamp; clears cookies;
-  302 `?github=connected`.
-- `status GET()` → `{connected, username}` (no token selected).
-- `disconnect DELETE()` → nulls the four GitHub columns → `{ok: true}`.
-- `repos GET(request)` — `search` param; `listForAuthenticatedUser
-  ({affiliation: owner, sort: pushed, per_page: 100})` × up to 2 pages,
-  substring filter → `{repos: [{fullName, name, private, defaultBranch,
-  updatedAt, url}]}`.
-- `branches GET(request)` — `?repo=owner/name`; format check; owner must
-  equal connected username (403 otherwise); `listBranches` (100) →
-  `{branches: [{name}]}`; GitHub 404 → clean 404.
-- `push POST(request)` — Zod schema (`mode` defaults `create`); per-mode
-  validation; shared preamble (auth → user+token → ownership-checked
-  workspace → `parseFileData` → `buildProjectFilesFromFileData()` →
-  300-file/8 MB caps → `decryptToken` → Octokit). Create: repo (422 →
-  409 exists) → Contents-API README seed → HEAD verify → blobs → tree on
-  HEAD → commit on HEAD → non-forced ref move → default-branch best-effort
-  → save link fields + `githubPushedFiles` → `{repoUrl, fullName,
-  branch}`. `createdRepo` + `pushFailedAfterCreate()` report
-  `REPO_CREATED_PUSH_FAILED` + URL after creation. Outer catch maps
-  401/403 → `GITHUB_TOKEN_INVALID`, rate-limit text → 429, else 500.
-- `parseFileData(raw)` / `byteLength(s)` — JSON guard; utf8 byte size.
-- `parsePushedPaths(raw)` — Json → `string[]` (non-strings dropped).
-- `pushToExisting({octokit, username, workspaceId, repoFullName, branch,
-  commitMessage, projectFiles, entries, previousPaths})` — owner ==
-  username else 403; `repos.get` (404 → clean); branch resolve (missing →
-  create from default HEAD; empty repo → Contents seed); HEAD commit+tree;
-  blobs for current files; **early-out** (recursive tree compare + no
-  deletions → `{unchanged: true}`, timestamps refreshed, no commit);
-  overlay tree (`base_tree` + current + `sha: null` deletions) → commit on
-  HEAD → non-forced `updateRef` (422 → `409 BRANCH_DIVERGED`); save link
-  fields + pushed paths.
+| Endpoint | Input / behavior |
+|---|---|
+| `GET /api/orgs` | Authenticated user's organizations, roles, balances/plans/Clerk links, active selection. |
+| `POST /api/orgs/switch` | `{organizationId}`; target membership required; persist pointer and return Clerk org link for client activation. |
+| `POST /api/orgs/create` | `{name}` (1–60 trimmed chars); caller local OWNER, additional org credits **0**, provider provisioning; failures remain visible. |
+| `POST /api/orgs/repair` | `{organizationId}`; verified local OWNER, exact metadata recovery or empty legacy-org creator repair only; never change billing/balance. |
+| `GET /api/orgs/members` | Current active-org membership list and caller role. |
+| `POST /api/orgs/members/add` | `{email, role?: "ADMIN" \| "MEMBER"}`; OWNER/ADMIN, current Clerk admin verification, pending invite check, Clerk invitation email. Existing provider membership uses shared authoritative sync. |
+| `PATCH /api/orgs/members/role` | `{memberId, role: "ADMIN" \| "MEMBER"}`; no own-role or OWNER changes; lock/recheck and update Clerk before Prisma. |
+| `DELETE /api/orgs/members/remove` | `{memberId}`; manager removal or self-leave, sole-OWNER protection; Clerk-first, local removal and conditional selection repair. |
+| `POST /api/orgs/invitations/complete` | `{clerkOrgId}`; current authenticated Clerk membership required; mirror and select accepted org. No membership is granted from the ID alone. |
+| `POST /api/orgs/sync` | OWNER/ADMIN; current active linked org; reconcile additions, roles, **and removals**. |
+| `DELETE /api/orgs/delete` | `{organizationId}`; OWNER, no other local/provider members, current provider access, billing resolved/ended; Clerk-first deletion, then local cascade/pointer repair. |
+| `POST /api/orgs/billing/checkout` | `{clerkOrgId}`; OWNER and matching persistent Prisma selection, session org, and client org; preflight before Clerk drawer. |
+| `POST /api/orgs/billing/sync` | No client plan/balance; fetch active org provider state and call `syncOrgPlan`. Provider failure → 503, not Free. |
 
-## Actions + `checkUser`
+Auth/role/context failures use redirects or endpoint-specific 401/403/404/409;
+provider failures are surfaced as retryable errors rather than silently
+changing local entitlements. See source for exact response shapes.
 
-- `getWorkspaceUser()` — `auth()` → user (`id/credits/plan` + GitHub token
-  presence/username → `githubConnected/username`) else `redirect("/")`.
-- `getWorkspaceById(id, userId)` — ownership-checked workspace incl.
-  GitHub link fields (`lastPushedAt` ISO-stringified) else redirect.
-- `getUserProjects()` — workspaces desc → `{id, title, firstPrompt
-  (first user msg ≤120), createdAt, updatedAt, messageCount}`.
-- `deleteProject(id)` — `deleteMany({id, userId})` + revalidate.
-- `getVersions(id)` — ownership-checked, newest-first `{id, summary,
-  fileCount, createdAt}` summaries (counts via `toSummary`), max 20.
-- `restoreVersion(workspaceId, versionId)` — snapshots current as
-  `"Before restore"`, sets files to the version, prunes, returns detail —
-  free, undoable.
-- `pruneVersions(id)` — deletes everything past the 20 newest.
-- `getInternalUserId` / `assertOwnership` — clerkId → id; redirect guards.
-- `checkUser()` — `currentUser()` null → null; plan via
-  `has({plan})`; plan change → upgrade-only credit delta through
-  `updateMany({clerkId, plan: old})` race guard + refetch; else existing;
-  new user → create with free credits/plan.
+## AI request contracts
 
-## `WorkspaceClient.tsx`
+### `POST /api/gen-ai-code`
 
-- `parseMessages(raw)` / `parseFileData(raw)` — DB Json runtime guards.
-- `pushStep(label)` / `completeSteps()` — status-log running/done marks.
-- `applyCredits(next)` — ref + state + `emitCredits` in one place.
-- `decrementOptimistic()` (−1 + emit on submit),
-  `refundOptimistic()` (+1 + emit on no-charge failures),
-  `applyAuthoritative(next, fallback)` (SSE `done` value wins).
-- `handleGenerate(prompt, imageUrl?, opts?)` — guards; append user msg;
-  `fetch /api/gen-ai-code {workspaceId,userId,messages,fileData: ref}`
-  under `AbortController`; SSE `status/done/error`; `done` sets
-  workspace/files/authoritative credits + assistant msg +
-  `replaceState(?id=)` + `refreshVersions()`; 402 silent rollback, 429
-  toast; `AbortError` silent 1-msg rollback; else toast (5 s, 8–15 s
-  quota) + rollback; `finally` resets controller/flags/log.
-- `handleImprove(userRequest, imageUrl?, opts?)` — guards (+workspace/
-  files); `model = opts?.model ?? editModel` into the POST body;
-  appends user + empty assistant placeholder; `fetch
-  /api/improve`; `thinking` streams into placeholder; `fileData` applies
-  once at `done` (summary replaces thinking); 402/403 toasts; non-ok JSON
-  surfaces server messages (e.g. `QWEN_NOT_CONFIGURED`) with rollback +
-  refund; abort → silent `rollbackCount` (2, or 1 for regenerate/edit)
-  rollback; errors toast by code (quota/overload 8–15 s, `MAX_ITERATIONS`
-  8 s) + rollback; `finally` refreshes the Qwen budget after Qwen runs.
-- `handleRegenerate()` — last user message re-run, `appendUser: false` +
-  current toggle model (1 credit). `handleEditMessage(i, content)` —
-  truncate at `i`, resubmit edited message (same routing/credits as fresh).
-- `handleStop()` — aborts live controller(s). `handleFixError(error)` —
-  agent path (with toggle model) when files exist, else generation.
-- `onGenerate(prompt, imageUrl?, model?)` — hybrid wrapper (refs, never
-  stale): workspace + files → `handleImprove(…, {model})`, else
-  `handleGenerate` (model ignored — first prompts are always Gemini).
-- `editModel` state (`"gemini"` default) + `handleEditModelChange`
-  (fetches Qwen budget when toggled to Qwen); `refreshQwenBudget()` —
-  `GET /api/models/qwen-budget` → display-only state, called on toggle
-  and after Qwen runs (no mount fetch — Gemini is the default view).
-- `refreshVersions()` / `handleRestoreVersion()` — history list + undoable
-  restore + success toast.
-- Chat-width persistence (`localStorage drevo:chat-width`, 240–560px
-  pointer drag), `focusMode` toggle, `lastPush`/GitHub connection state
-  for `CodePanel`.
+```ts
+{
+  orgId: string;
+  workspaceId?: string | null;
+  revision?: number; // required for an existing project
+  messages: Message[];
+  fileData?: FileData | null;
+}
+```
 
-## ChatPanel / CodePanel / dialog / header
+Clerk determines identity. New-project creation requires OWNER/ADMIN in the
+matching active org; an existing project requires membership in its org and the
+expected revision. Parse/screen, check credits, acquire lease, generate valid
+full-project JSON, validate packages/cancellation, commit via `saveAiWorkspace`.
 
-- ChatPanel: auto-submit of `initialPrompt` once (`hasAutoSubmittedRef`,
-  only when empty); `handleSubmit` (trimmed + pending image + toggle model →
-  `onGenerate`, clears); Gemini/Qwen segmented toggle (workspace exists
-  only) + `Qwen free: N left today` microcopy (checking / unconfigured /
-  unknown / exhausted-with-UTC-reset states); `handleKeyDown`
-  Enter-without-shift submits; `handleFileChange` (accepts `image/*`,
-  uploads `userId/workspaceId|new/timestamp.ext` to `workspace-images`,
-  stores public URL, thumbnail preview with remove).
-- CodePanel: `handleExportZip` (zips `buildProjectFiles()` map →
-  `exportZipName(appTitle)` download); `handleQuickUpdate` (existing-mode
-  push to linked repo, `"Update from Drevo"`, `unchanged` toast,
-  401-codes flip connection); filePathKey remount rule; `updateFile` diff
-  effect; Sandpack error listener → banner.
-- Dialog: `handleOpenChange` (slug prefill), `handleTabChange`
-  (lazy repo load + message defaults), `handleSearchChange` (400 ms
-  debounce), `loadRepos/loadBranches` (main-first default),
-  `handleSelectRepo`, `handlePush/handlePushExisting` (via
-  `applyResult`: toasts, `onPushed`, `failedRepo` box),
-  `retryInCreatedRepo`, `handleDisconnect`; `slugify`, `GithubMark`,
-  `LastPush`; `canPush/canPushExisting` guards; `repoNameError` memo.
-- Header: `Header()` (async server, `checkUser()`); `HeaderCredits
-  ({initial})` (render-time adopt + bus subscribe, Zap pill in
-  `PricingModal`); `LogoMark({size})` (Zap mark).
-- Client API lib: `pushToGithub()` (uniform ok/error incl. `unchanged`),
-  `listGithubRepos/listGithubBranches`; `emitCredits/subscribeCredits`;
-  `buildProjectFiles*/exportZipName`; `encryptToken/decryptToken`,
-  `validateRepoName/validateBranchName`, `parseRepoFullName`,
-  `newOAuthState/buildAuthorizeUrl/getGithubClientId/getGithubRedirectUri`;
-  `getGithubContext/GithubRouteError/githubErrorResponse`; `cn()`.
+### `POST /api/improve`
+
+```ts
+{
+  workspaceId: string;
+  revision: number;
+  userRequest: string;
+  imageUrl?: string;
+  messages?: Message[];
+  fileData: FileData;
+  model?: "gemini" | "qwen" | "atria";
+}
+```
+
+Existing-project membership and revision required. Same screening/lease/credit
+preflight as generation. Run patch tools, classify completion, return no-op free
+or commit valid changed work through `createFinishRun` / `saveAiWorkspace`.
+Unsupported model values fail request validation; missing provider keys return
+configuration errors before provider work.
+
+### Guards and shared helpers
+
+| Helper — `lib/ai-request.ts` | Behavior |
+|---|---|
+| `GenerateRequestSchema`, `ImproveRequestSchema` | Validate body fields, IDs, model allowlist, existing-workspace revision. |
+| `FileDataSchema`, `GeneratedOutputSchema` | Nonempty safe file map, string code, bounded deps/title/output; generation also requires assistant text. |
+| `validateApp(data)` | Require valid shape plus nonempty `/App.js` with `export default`. **Not** a compiler or runtime correctness proof. |
+| `readAiBody(request)` | Body-size checks around parsing (10,000,000 bytes); host ingress limits are still useful. |
+| `protectAi(request, body, clerkId, prompt)` | Shared Arcjet rate/prompt screen; denial → free 429. |
+| `acquireAiLease(userId, workspaceId?)` | Atomically claim user/existing-workspace leases; conflict → error/409; return token-scoped best-effort release function. |
+| `aiErrorMessage(error)` | Expose known no-charge validation/save messages; sanitize unexpected errors. |
+
+Current schema bounds: up to 300 files, 1,000,000 characters of code per file,
+8,000,000 aggregate code characters; 80 dependencies; 1–1,000 history messages
+with at most 40,000 characters per message. GitHub separately checks UTF-8 bytes.
+
+`saveAiWorkspace(args)` in `lib/workspace-save.ts` rechecks access/revision,
+snapshots **DB state**, and charges `Organization.credits` in one transaction.
+Return: `{workspaceId, revision, creditsRemaining}`. Its internal pruning uses
+`pruneVersionsBestEffort(id)` from `lib/versions.ts`; retention is scoped and is
+not exposed as a server action.
+
+Internal history helpers in `lib/versions.ts` are `createWorkspaceVersion(tx,
+workspaceId, fileData, summary)`, `readVersionFileData(tx, workspaceId, versionId)`,
+and `lockWorkspaceHistory(tx, workspaceId)`. Reconstruction requires authorized,
+locked transaction callers. The codec in `lib/version-data.ts` chooses and
+verifies checkpoint/text-delta payloads. See [11](./11-text-patch-version-history.md).
+
+### Agent module interfaces
+
+- `createImproveTools(state, emitFilePatch)` → update-file, dependency, completion tools.
+- `buildAgentInstructions(...)`, `buildAgentInput(...)`, `buildFileContext(...)`
+  → bounded conversation/file instructions. Image references are URL text.
+- `runAgentWithRetries(args)` → `{steps, finalText, streamError}` or null for
+  cancellation. Three overload attempts with fresh state; SDK retries disabled.
+- `createFinishRun(args)` → finalization callback; validate before/after package
+  lookup and cancellation, shared save, emit summary/partial/credits/revision.
+- `diffPaths(current, base)` → added/edited paths; dependency differences are
+  checked separately for no-op detection.
+- Error helpers in `errors.ts` match nested statuses/causes and `Retry-After`.
+  Quota/overload failures are not blindly retried or relabeled as step exhaustion.
+
+## AI SSE responses
+
+| Event | Fields |
+|---|---|
+| `status` | `message` |
+| `thinking` | `text` (editing) |
+| `file_patch` | `path`, `code`, `reason` (editing progress; not a commit receipt) |
+| `done` | `fileData`, `creditsRemaining`, `revision`; generation adds `workspaceId`, `assistantMessage`; editing adds `summary`, `partial` |
+| `error` | `message`, optional `code`, `retryAfter` |
+
+Before opening the SSE stream, invalid requests → 400; no identity → 401; no
+access/project → 404/403 as applicable; no credits → 402; stale revision or
+already-running lease → 409; rate/prompt denial → 429. Failures after streaming
+starts are SSE events, not a new HTTP status.
+
+`done` can be a free no-op. Saved changed work costs one credit; a valid retained
+partial edit can also cost one. Cancellation observed before commit rolls back;
+loss of the response after commit must be reconciled, not assumed free.
+
+## Signed webhook
+
+`POST /api/webhooks/clerk` requires `svix-id`, `svix-timestamp`,
+`svix-signature`, and `CLERK_WEBHOOK_SECRET`. Verify **original raw bytes**,
+then parse. Svix v2 verification returns no event payload.
+
+- `subscription.*`, `subscriptionItem.*`, `paymentAttempt.paid` → current plan
+  sync; eligible verified paid payloads also supply delayed grant periods.
+- `organizationMembership.*`, `organizationInvitation.accepted` → current
+  provider membership sync, not a blind event-role upsert.
+- `organization.created` → exact private `drevoOrganizationId` link only.
+- `organization.deleted` → verify provider 404 before local deletion.
+
+Missing/invalid signature → 400, missing secret/processing failure → 500,
+handled/ignored event → `{ok: true}`. Events lacking an extractable payer org
+are logged and skipped; review payloads/delivery rather than assuming sync.
+
+## GitHub and export
+
+| Interface | Behavior |
+|---|---|
+| `GET /api/github/connect` | Clerk auth, OAuth state cookies, redirect to GitHub. |
+| `GET /api/github/callback` | Validate state/code, exchange token, encrypt/store account credentials, return to workspace. |
+| `GET /api/github/status` | `{connected, username}`; never token. |
+| `DELETE /api/github/disconnect` | Clear credentials only. |
+| `GET /api/github/repos?search=` | Connected user's own-repo list; up to two 100-entry pages. |
+| `GET /api/github/branches?repo=owner/name` | Validate own-repo owner and list branches, capped at 100. |
+| `POST /api/github/push` | `{workspaceId, mode?: "create" \| "existing", repoName?, isPrivate?, repoFullName?, branch?, commitMessage?}`; rebuild files from DB, verify org membership and user's GitHub target, never force-push. |
+
+Push success: `{repoUrl, fullName, branch, unchanged?, trackingSaved}`.
+`trackingSaved: false` means GitHub succeeded but local target history could not
+be saved. Clients show a warning, not a false remote-failure toast.
+
+`recordPush(...)` is route-internal; history is keyed by project/user/lowercase
+repo/branch. `pushToExisting(...)` obtains only that target's prior paths; remote
+ref conflicts → `BRANCH_DIVERGED`. Rate limit is distinguished from invalid
+credentials and repository permission denial. Full algorithm: [07](./07-github-integration.md).
+
+`lib/export-project.ts`: `buildProjectFiles`, `buildProjectFilesFromFileData`,
+`exportZipName`, base dependencies/scaffold constants. Both ZIP and push use the
+same safe-path builder.
+
+`lib/github-push-client.ts`: `pushToGithub`, `listGithubRepos`,
+`listGithubBranches`; shared by dialog and quick update.
+
+## Client credit notifications
+
+`emitCredits(credits, orgId)` / `subscribeCredits(orgId, callback)` in
+`lib/credits-bus.ts`: display-only organization-scoped events. `WorkspaceClient`
+owns optimistic decrement/refund and authoritative completion; fresh server
+props and interrupted-stream refresh reconcile it. A client balance never
+authorizes spending.

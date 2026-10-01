@@ -16,6 +16,10 @@ function load(file, dependencies = {}, globals = {}) {
   return context.exports;
 }
 const validation = load("lib/validation.ts");
+const versionData = load("lib/version-data.ts", { "node:crypto": require("node:crypto"), diff: require("diff"), zod: require("zod"), "@/lib/validation": validation });
+function versionModule(db) {
+  return load("lib/versions.ts", { "@/lib/validation": validation, "@/lib/prisma": { db }, "@/lib/generated/prisma/client": { Prisma: { DbNull: null } }, "@/lib/version-data": versionData });
+}
 const plans = { free: { credits: 10 }, starter: { credits: 50 }, pro: { credits: 150 } };
 const clerkLib = load("lib/clerk.ts", { "@clerk/nextjs/server": {}, "./constants": { PLANS: plans } });
 
@@ -47,14 +51,17 @@ test("signed-out users and non-admin members cannot read or delete projects via 
 
 test("pruning filters both reads and deletes by exact workspace and cleanup failures stay non-fatal", async () => {
   const calls = [];
-  const versions = load("lib/versions.ts", { "@/lib/validation": validation, "@/lib/prisma": { db: { workspaceVersion: {
-    async findMany(args) { calls.push(plain(args)); return [{ id: "old" }]; }, async deleteMany(args) { calls.push(plain(args)); },
-  } } } });
+  const tx = { $queryRaw: async () => [], workspaceVersion: {
+    async findMany(args) { calls.push(plain(args)); return Array.from({ length: 21 }, (_, i) => ({ id: `v${i}`, kind: "snapshot" })); },
+    async deleteMany(args) { calls.push(plain(args)); },
+  } };
+  const versions = versionModule({ $transaction: (fn) => fn(tx) });
   await assert.rejects(versions.pruneVersions(undefined), /Invalid/);
   await versions.pruneVersions("w");
   assert.equal(calls[0].where.workspaceId, "w");
   assert.equal(calls[1].where.workspaceId, "w");
-  const failure = load("lib/versions.ts", { "@/lib/validation": validation, "@/lib/prisma": { db: { workspaceVersion: { findMany: async () => { throw new Error("DB cleanup down"); } } } } });
+  assert.deepEqual(calls[1].where.id.in, ["v20"]);
+  const failure = versionModule({ $transaction: async () => { throw new Error("DB cleanup down"); } });
   await failure.pruneVersionsBestEffort("w");
 });
 
@@ -112,7 +119,11 @@ function saveFixture({ credits = 2, revision = 0, cleanupFails = false, member =
           state.revision++; state.fileData = data.fileData; return { count: 1 };
         },
       },
-      workspaceVersion: { create: async ({ data }) => state.snapshots.push(data.fileData) },
+      workspaceVersion: {
+        findFirst: async () => null,
+        create: async ({ data }) => state.snapshots.push(data.fileData),
+        findMany: async () => { if (cleanupFails) throw new Error("Pruning down"); return []; },
+      },
       organization: {
         updateMany: async () => { if (abortAtCharge) signal.abort(); if (state.credits < 1) return { count: 0 }; state.credits--; return { count: 1 }; },
         findUniqueOrThrow: async () => ({ credits: state.credits }),
@@ -120,9 +131,7 @@ function saveFixture({ credits = 2, revision = 0, cleanupFails = false, member =
     };
     try { return await fn(tx); } catch (error) { state = before; throw error; }
   } };
-  const cleanup = load("lib/versions.ts", { "@/lib/validation": validation, "@/lib/prisma": { db: { workspaceVersion: {
-    findMany: async () => { if (cleanupFails) throw new Error("Pruning down"); return []; },
-  } } } });
+  const cleanup = versionModule(db);
   const saver = load("lib/workspace-save.ts", { "@/lib/prisma": { db }, "@/lib/constants": { CREDIT_COST_PER_GENERATION: 1 }, "@/lib/versions": cleanup, "@/lib/ai-request": aiModule() });
   const args = { workspaceId: "w", revision: 0, orgId: "o", userId: "u", fileData: app, messages: [{ role: "user", content: "change" }], summary: "Change", signal: signal.signal };
   return { save: (override = {}) => saver.saveAiWorkspace({ ...args, ...override }), state: () => state, signal };

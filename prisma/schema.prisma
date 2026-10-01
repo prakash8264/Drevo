@@ -109,11 +109,23 @@ model WorkspaceVersion {
   id          String   @id @default(cuid())
   workspaceId String
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  fileData    Json
+  // Legacy/new checkpoints retain full files; delta rows store only changes.
+  fileData    Json?
+  kind        String @default("snapshot")
+  delta       Json?
+  formatVersion Int @default(1)
+  contentHash String?
+  fileCount   Int @default(0)
+  chainDepth  Int @default(0)
+  baseVersionId String?
+  baseVersion WorkspaceVersion? @relation("VersionChain", fields: [baseVersionId, workspaceId], references: [id, workspaceId], onDelete: NoAction, onUpdate: NoAction)
+  dependentVersions WorkspaceVersion[] @relation("VersionChain")
   summary     String?
   createdAt   DateTime @default(now())
 
   @@index([workspaceId])
+  @@unique([id, workspaceId])
+  @@index([workspaceId, createdAt, id])
 }
 
 model OrganizationCreditGrant {
