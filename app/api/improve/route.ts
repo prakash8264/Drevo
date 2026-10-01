@@ -64,10 +64,9 @@ export async function POST(request: NextRequest) {
   const denied = await protectAi(request, body, clerkId, userRequest);
   if (denied) return denied;
 
-  // Only these edit models exist. Anything else (missing, tampered) falls
-  // back to Gemini, which is also the toggle default.
+  // Validation rejects unknown models; an omitted model defaults to Gemini.
   const editModel: EditModelId =
-    requestedModel === "qwen" || requestedModel === "atria"
+    requestedModel === "nemotron" || requestedModel === "atria"
       ? requestedModel
       : "gemini";
 

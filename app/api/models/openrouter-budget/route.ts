@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 
-// Free-model daily budget for the Qwen toggle, read server-side so the
+// Account-wide key spending budget in USD for the Nemotron toggle, so the
 // OpenRouter key never reaches the browser. Shape confirmed live against
 // GET /api/v1/key: { data: { limit, limit_remaining, ... } }.
+// These numbers are NOT the shared free-model daily request quota.
 // Cached ~60s in-module so checking the budget never meaningfully spends it.
 interface BudgetCache {
   at: number;
@@ -45,7 +46,7 @@ export async function GET() {
     cache = { at: Date.now(), payload };
     return NextResponse.json(payload);
   } catch (err) {
-    console.error("[models/qwen-budget] failed:", err);
+    console.error("[models/openrouter-budget] failed:", err);
     // Fail open with unknown numbers rather than breaking the chat UI.
     return NextResponse.json({ configured: true, remaining: null, limit: null });
   }

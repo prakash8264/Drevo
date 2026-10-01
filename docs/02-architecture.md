@@ -162,7 +162,7 @@ Keep server secrets out of `NEXT_PUBLIC_*` variables and out of documentation.
 | `DIRECT_URL` | Prisma CLI datasource in `prisma7.config.ts`; intended migration DB |
 | `GEMINI_API_KEY` | Initial generation and Gemini edits |
 | `GEMINI_FALLBACK_MODEL` | Optional Gemini overload fallback; empty disables |
-| `OPENROUTER_API_KEY` | Optional Qwen editing and budget display |
+| `OPENROUTER_API_KEY` | Optional NVIDIA Nemotron 3 Ultra (free) editing and account spending-budget display |
 | `ATRIA_API_KEY` | Optional Atria editing |
 | `ARCJET_KEY` | Global and AI-route protection |
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Browser image upload; bucket policies must enforce authorization |

@@ -33,7 +33,7 @@ request instead of silently creating in another organization.
 and current model choice; preview errors use **Fix with AI**.
 
 1. Send project ID, expected revision, request/history, files, and allowlisted
-   editing model (Gemini/Qwen/Atria).
+   editing model (Gemini/Nemotron/Atria).
 2. Server validates, screens/rate-limits, verifies project-org membership,
    checks credits/revision, and claims user **and project** AI leases.
 3. Agent mutates per-run file/dependency maps using tools; progress arrives as

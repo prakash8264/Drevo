@@ -2,7 +2,7 @@
 
 // Edit-model toggle for follow-up improve runs. Generation (first prompt)
 // is always Gemini; only the agent patch path offers a choice.
-export type EditModelId = "gemini" | "qwen" | "atria";
+export type EditModelId = "gemini" | "nemotron" | "atria";
 
 export type MessageRole = "user" | "assistant";
 

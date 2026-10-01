@@ -22,7 +22,7 @@ export const GenerateRequestSchema = z.object({
 export const ImproveRequestSchema = z.object({
   workspaceId: Id, revision: z.number().int().min(0), userRequest: z.string().trim().min(1).max(40000),
   imageUrl: z.string().url().max(2000).optional(), messages: Messages.optional(),
-  fileData: FileDataSchema, model: z.enum(["gemini", "qwen", "atria"]).optional(),
+  fileData: FileDataSchema, model: z.enum(["gemini", "nemotron", "atria"]).optional(),
 });
 export const GeneratedOutputSchema = FileDataSchema.extend({ assistantMessage: z.string().trim().min(1).max(40000) });
 

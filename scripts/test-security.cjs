@@ -9,7 +9,7 @@ const ts = require("typescript");
 const { Webhook } = require("svix");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 function load(file, dependencies = {}, globals = {}) {
-  const code = ts.transpileModule(readFileSync(resolve(__dirname, "..", file), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const code = ts.transpileModule(readFileSync(resolve(__dirname, "..", file), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const context = { exports: {}, Error, Response, Request, AbortSignal, AbortController, ReadableStream, TextEncoder, Buffer, Date, setTimeout, clearTimeout, console: { error() {}, warn() {}, log() {} }, ...globals,
     require(name) { if (!(name in dependencies)) throw new Error(`Unexpected dependency: ${name}`); return dependencies[name]; } };
   vm.runInNewContext(code, context, { filename: file });
@@ -101,7 +101,155 @@ test("AI inputs/outputs reject empty files, invalid code types, unsafe paths and
   assert.equal(ai.GenerateRequestSchema.safeParse(base).success, false);
   assert.equal(ai.GenerateRequestSchema.safeParse({ ...base, revision: 0 }).success, true);
   assert.equal(ai.ImproveRequestSchema.safeParse({ workspaceId: "w", revision: 0, userRequest: "change", fileData: app, model: "untrusted-provider" }).success, false);
+  assert.equal(ai.ImproveRequestSchema.safeParse({ workspaceId: "w", revision: 0, userRequest: "change", fileData: app, model: "nemotron" }).success, true);
+  assert.equal(ai.ImproveRequestSchema.safeParse({ workspaceId: "w", revision: 0, userRequest: "change", fileData: app, model: "qwen" }).success, false);
   assert.equal(clerkLib.toDrevoPlan("notaproplan"), "free");
+});
+
+test("Nemotron resolver uses the exact free model with the server OpenRouter key and fails closed without it", () => {
+  const calls = [];
+  const env = { OPENROUTER_API_KEY: "  fixture-openrouter-key  " };
+  const nemotron = load("app/api/improve/models/nemotron.ts", { "@openrouter/ai-sdk-provider": {
+    createOpenRouter: ({ apiKey }) => (modelId) => { calls.push({ apiKey, modelId }); return { modelId }; },
+  } }, { process: { env } });
+  const modelId = "nvidia/nemotron-3-ultra-550b-a55b:free";
+  const models = load("app/api/improve/models/index.ts", {
+    "./nemotron": nemotron, "./gemini": { resolveGeminiModel: () => ({ short: "Gemini" }) }, "./atria": { resolveAtriaModel: () => ({ short: "Atria" }) },
+  });
+  const selected = models.resolveImproveModel("nemotron");
+  assert.equal(selected.short, "Nemotron");
+  assert.equal(selected.model.modelId, modelId);
+  assert.match(selected.label, /Nemotron/);
+  assert.deepEqual(calls, [{ apiKey: "fixture-openrouter-key", modelId }]);
+  assert.equal(models.resolveImproveModel("gemini").short, "Gemini");
+  assert.equal(models.resolveImproveModel("atria").short, "Atria");
+  for (const key of [undefined, "", "  "]) {
+    env.OPENROUTER_API_KEY = key;
+    assert.throws(() => models.resolveImproveModel("nemotron"), /NEMOTRON_NOT_CONFIGURED/);
+  }
+  assert.equal(calls.length, 1);
+  const response = models.notConfiguredResponse("nemotron");
+  assert.equal(response.code, "NEMOTRON_NOT_CONFIGURED");
+  assert.match(response.message, /Nemotron.*OpenRouter/);
+  const errors = load("app/api/improve/errors.ts");
+  const quota = errors.quotaErrorPayload({ statusCode: 429 }, selected.short);
+  assert.match(quota.message, /Nemotron rate limit.*switch to Gemini/);
+});
+
+test("improve route honors Nemotron selection without charging for a missing key or no-op", async () => {
+  for (const missingKey of [true, false]) {
+    const selections = [];
+    let runs = 0, saved = 0, released = 0;
+    const db = {
+      user: { findUnique: async () => ({ id: "u", memberships: [{ role: "MEMBER", organization: { id: "o", credits: 2 } }] }) },
+      workspace: { findUnique: async () => ({ organizationId: "o", revision: 0 }) },
+      organization: { findUnique: async () => ({ credits: 2 }) },
+    };
+    const ai = aiModule(db);
+    const route = load("app/api/improve/route.ts", {
+      "@clerk/nextjs/server": { auth: async () => ({ userId: "user_fixture" }) }, "next/server": {},
+      "@/lib/prisma": { db }, "@/lib/constants": { CREDIT_COST_PER_GENERATION: 1 },
+      "@/lib/ai-request": { ...ai, acquireAiLease: async () => async () => released++ },
+      "./errors": load("app/api/improve/errors.ts"),
+      "./models": {
+        resolveImproveModel: (selection) => { selections.push(selection); if (missingKey) throw new Error("NEMOTRON_NOT_CONFIGURED"); return { short: "Nemotron", label: "Nemotron", model: {} }; },
+        notConfiguredResponse: () => ({ code: "NEMOTRON_NOT_CONFIGURED", message: "Add an OpenRouter key to enable Nemotron." }),
+      },
+      "./agent-tools": { createImproveTools: () => ({}) },
+      "./agent-prompts": load("app/api/improve/agent-prompts.ts"),
+      "./agent-finish": { createFinishRun: () => async () => saved++, diffPaths: () => [] },
+      "./agent-run": { runAgentWithRetries: async () => { runs++; return { steps: [{ toolCalls: [{ toolName: "done_improving" }] }], finalText: "NO_OP: No changes needed.", streamError: null }; } },
+    }, { process: { env: {} } });
+    const response = await route.POST(new Request("https://example.com/api/improve", { method: "POST", body: JSON.stringify({ workspaceId: "w", revision: 0, userRequest: "Explain this app without changing it", fileData: app, model: "nemotron" }) }));
+    assert.deepEqual(selections, ["nemotron"]);
+    assert.equal(response.status, missingKey ? 400 : 200);
+    if (missingKey) assert.equal((await response.json()).code, "NEMOTRON_NOT_CONFIGURED");
+    else assert.match(await response.text(), /"type":"done".*"creditsRemaining":2/);
+    assert.equal(runs, missingKey ? 0 : 1); assert.equal(released, missingKey ? 0 : 1); assert.equal(saved, 0);
+  }
+});
+
+test("Nemotron runs update and completion tools through the actual AI SDK with mocked OpenRouter SSE", async () => {
+  const ai = await import("ai");
+  const { createOpenRouter } = await import("@openrouter/ai-sdk-provider");
+  const requests = [];
+  const updatedCode = "export default function App() { return 'Updated by Nemotron'; }";
+  const nemotron = load("app/api/improve/models/nemotron.ts", { "@openrouter/ai-sdk-provider": {
+    createOpenRouter: (settings) => createOpenRouter({ ...settings, fetch: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body);
+      assert.equal(body.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
+      assert.equal(body.tool_choice, "required");
+      const first = requests.length === 1;
+      const args = first ? { path: "/App.js", code: updatedCode, reason: "Update heading" } : { summary: "Updated heading." };
+      const chunk = { id: "fixture-completion", object: "chat.completion.chunk", created: 1, model: body.model,
+        choices: [{ index: 0, delta: { role: "assistant", content: null, tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function", function: { name: first ? "update_file" : "done_improving", arguments: JSON.stringify(args) } }] }, finish_reason: "tool_calls" }],
+      };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+    } }),
+  } }, { process: { env: { OPENROUTER_API_KEY: "fixture-not-a-real-key" } } });
+  const state = { files: plain(app.files), dependencies: {}, setSummary: (value) => { state.summary = value; } };
+  const factory = load("app/api/improve/agent-tools.ts", { ai, zod: require("zod"), "@/lib/validation": validation });
+  const errors = load("app/api/improve/errors.ts");
+  const engine = load("app/api/improve/agent-run.ts", { ai, "./errors": errors });
+  const selected = nemotron.resolveNemotronModel();
+  const result = await engine.runAgentWithRetries({ model: selected.model, modelLabel: selected.label,
+    instructions: "Update the heading, then call done_improving.", input: "Change the heading.",
+    tools: factory.createImproveTools(state, () => {}), abortSignal: new AbortController().signal,
+    resetRunState() {}, shouldStop: () => false, enqueue() {},
+  });
+  assert.equal(requests.length, 2);
+  assert.equal(state.files["/App.js"].code, updatedCode);
+  assert.equal(state.summary, "Updated heading.");
+  assert.ok(result.steps.some((step) => step.toolCalls.some((call) => call.toolName === "done_improving")));
+  assert.equal(result.streamError, null);
+});
+
+test("OpenRouter budget stays authenticated/server-only and returns spending limits rather than request counts", async () => {
+  for (const scenario of ["signed-out", "missing-key", "success", "provider-failure"]) {
+    let calls = 0;
+    const route = load("app/api/models/openrouter-budget/route.ts", {
+      "next/server": { NextResponse: Response },
+      "@clerk/nextjs/server": { auth: async () => ({ userId: scenario === "signed-out" ? null : "user_fixture" }) },
+    }, { process: { env: { OPENROUTER_API_KEY: scenario === "missing-key" ? "" : " fixture-key " } }, fetch: async (url, options) => {
+      calls++;
+      assert.equal(url, "https://openrouter.ai/api/v1/key");
+      assert.equal(options.headers.Authorization, "Bearer fixture-key");
+      return scenario === "provider-failure" ? new Response("Unauthorized", { status: 401 }) : Response.json({ data: { limit: 5, limit_remaining: 4.25 } });
+    } });
+    const response = await route.GET();
+    assert.equal(response.status, scenario === "signed-out" ? 401 : 200);
+    const payload = await response.json();
+    assert.equal(JSON.stringify(payload).includes("fixture-key"), false);
+    if (scenario === "success") {
+      assert.deepEqual(payload, { configured: true, remaining: 4.25, limit: 5 });
+      await route.GET();
+      assert.equal(calls, 1); // cache avoids extra provider reads
+    } else if (scenario === "provider-failure") assert.deepEqual(payload, { configured: true, remaining: null, limit: null });
+    else assert.equal(calls, 0);
+  }
+});
+
+test("chat selector displays Nemotron and labels OpenRouter's USD budget without daily-quota claims", () => {
+  const React = require("react");
+  const { renderToStaticMarkup } = require("react-dom/server");
+  const empty = () => null;
+  const { ChatPanel } = load("components/ChatPanel.tsx", {
+    react: React, "react/jsx-runtime": require("react/jsx-runtime"), "@clerk/nextjs": { useUser: () => ({ user: null }) },
+    "lucide-react": new Proxy({}, { get: () => empty }), "@/lib/utils": { cn: (...args) => args.filter(Boolean).join(" ") },
+    sonner: { toast: {} }, "react-markdown": { default: empty }, "@/components/ui/button": { Button: empty },
+    "@/components/PricingModal": { PricingModal: ({ children }) => children }, "@supabase/supabase-js": { createClient: () => ({}) },
+    "./reusables": { BrandTitle: ({ children }) => children }, "@/components/LogoMark": { LogoMark: empty },
+  }, { process: { env: {} } });
+  const props = { messages: [], statusLog: [], credits: 2, workspaceId: "w", orgId: "o", appTitle: "Fixture", editModel: "nemotron", isGenerating: false, isImproving: false };
+  for (const budget of [null, { configured: false }, { configured: true, remaining: null }, { configured: true, remaining: 0, limit: 5 }]) {
+    const html = renderToStaticMarkup(React.createElement(ChatPanel, { ...props, openRouterBudget: budget }));
+    assert.match(html, /NVIDIA: Nemotron 3 Ultra via OpenRouter \(free\)/);
+    assert.match(html, />Nemotron<\/button>/);
+    assert.doesNotMatch(html, /Qwen|left today|resets UTC midnight/);
+    if (budget?.remaining === 0) assert.match(html, /OpenRouter key budget: \$0\.00 remaining/);
+    if (budget?.configured === false) assert.match(html, /Add an OpenRouter key to enable Nemotron/);
+  }
 });
 
 function saveFixture({ credits = 2, revision = 0, cleanupFails = false, member = true, loseRace = false, abortAtCharge = false } = {}) {

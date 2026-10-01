@@ -47,8 +47,8 @@ interface ChatPanelProps {
   // Edit-model toggle (follow-up prompts only — first generation is Gemini).
   editModel: EditModelId;
   onEditModelChange: (model: EditModelId) => void;
-  // Qwen free-pool budget (display-only, refreshed by the parent).
-  qwenBudget: {
+  // OpenRouter account spending budget (display-only, refreshed by the parent).
+  openRouterBudget: {
     configured: boolean;
     remaining: number | null;
     limit: number | null;
@@ -72,7 +72,7 @@ export function ChatPanel({
   width,
   editModel,
   onEditModelChange,
-  qwenBudget,
+  openRouterBudget,
 }: ChatPanelProps) {
   const { user } = useUser();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -499,7 +499,7 @@ export function ChatPanel({
                   className="flex items-center rounded-md border border-border p-0.5"
                   title="Model used for follow-up edits"
                 >
-                  {(["gemini", "qwen", "atria"] as const).map((m) => (
+                  {(["gemini", "nemotron", "atria"] as const).map((m) => (
                     <button
                       key={m}
                       type="button"
@@ -508,8 +508,8 @@ export function ChatPanel({
                       title={
                         m === "gemini"
                           ? "Gemini 3.5 Flash (default)"
-                          : m === "qwen"
-                            ? "Qwen 3.8 27B via OpenRouter (free)"
+                          : m === "nemotron"
+                            ? "NVIDIA: Nemotron 3 Ultra via OpenRouter (free)"
                             : "Atria Dawn Preview via ATRIA ASI"
                       }
                       className={`rounded px-1.5 py-1 text-[10px] font-medium capitalize transition-colors disabled:opacity-40 ${
@@ -518,7 +518,7 @@ export function ChatPanel({
                           : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      {m === "gemini" ? "Gemini" : m === "qwen" ? "Qwen" : "Atria"}
+                      {m === "gemini" ? "Gemini" : m === "nemotron" ? "Nemotron" : "Atria"}
                     </button>
                   ))}
                 </div>
@@ -530,17 +530,18 @@ export function ChatPanel({
                     Text-only model — screenshots are sent as links it can&apos;t view.
                   </span>
                 )}
-                {editModel === "qwen" && (
-                  <span className="text-[10px] text-muted-foreground">
-                    {qwenBudget === null
-                      ? "Checking free quota…"
-                      : !qwenBudget.configured
-                        ? "Add an OpenRouter key to enable Qwen."
-                        : qwenBudget.remaining === null
-                          ? "Free quota unknown."
-                          : qwenBudget.remaining === 0
-                            ? "Qwen free: 0 left today — resets UTC midnight, Gemini unaffected."
-                            : `Qwen free: ${qwenBudget.remaining} of ${qwenBudget.limit ?? "?"} left today.`}
+                {editModel === "nemotron" && (
+                  <span
+                    className="max-w-52 text-center text-[10px] text-muted-foreground"
+                    title="Account-wide spending budget in USD, not a daily free-model request allowance. OpenRouter free-model limits still apply."
+                  >
+                    {openRouterBudget === null
+                      ? "Checking OpenRouter budget…"
+                      : !openRouterBudget.configured
+                        ? "Add an OpenRouter key to enable Nemotron."
+                        : openRouterBudget.remaining === null
+                          ? "Nemotron free — OpenRouter limits apply."
+                          : `OpenRouter key budget: $${openRouterBudget.remaining.toFixed(2)} remaining.`}
                   </span>
                 )}
               </div>

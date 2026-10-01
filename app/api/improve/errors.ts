@@ -91,9 +91,9 @@ export function quotaErrorPayload(
   // response headers as a last resort.
   const retryAfter =
     getQuotaRetryAfter(raw) ?? retryAfterHint ?? getRetryAfterHeader(err);
-  // Qwen runs on a shared free pool: point at the escape hatch.
+  // Nemotron runs on a shared free pool: point at the escape hatch.
   const switchHint =
-    providerLabel === "Qwen" ? " You can switch to Gemini and keep working." : "";
+    providerLabel === "Nemotron" ? " You can switch to Gemini and keep working." : "";
   return {
     message: retryAfter
       ? `${providerLabel} rate limit hit. Please retry in ~${retryAfter}s. No credits were deducted.${switchHint}`

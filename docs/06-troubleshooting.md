@@ -95,8 +95,10 @@ above the `try`; `maxRetries: 0` so our envelope is the sole retry authority
 remain (OpenRouter suggests BYOK provider keys to accumulate own limits).
 
 ## 14. Qwen toggle answers "not configured" / odd provider errors
-Cause: `OPENROUTER_API_KEY` empty (toggle's Qwen path returns a clean free
-`QWEN_NOT_CONFIGURED` 400 by design), or OpenRouter-side shapes (402
+The Qwen name here is historical: the OpenRouter slot now uses NVIDIA Nemotron
+3 Ultra (free), with `NEMOTRON_NOT_CONFIGURED` as its missing-key code.
+Cause: `OPENROUTER_API_KEY` empty (the selected OpenRouter path returns a clean
+free 400 by design), or OpenRouter-side shapes (402
 account-credit, `no endpoints`, gateway errors) mapped into the existing
 quota/overload paths. Fix: add an OpenRouter key (free models cost $0 but
 still require one); check the terminal `[improve:<label>]` attempt lines to
@@ -126,8 +128,9 @@ only then was anything built. Notes:
   parts are ever sent), but the model cannot view images (disclosed in UI).
 - Per-minute account RPM caps publish exact `Retry-After`/`x-rpm-*`
   headers — honored in quota payloads (body countdown → hint → header).
-- Toggle: Gemini/Qwen/Atria; no budget microcopy for Atria (per-minute
-  headers only, surfaced via toasts).
+- Original toggle: Gemini/Qwen/Atria; no budget microcopy for Atria (per-minute
+  headers only, surfaced via toasts). Qwen was subsequently replaced by
+  Nemotron; the Atria integration remains unchanged.
 
 ## 17. MiMo-V2.6-Flash Free is caller-gated like Spark — parked
 Live probe (minimal chat-completions call, valid Zen key, 2026-09-24):
@@ -138,7 +141,7 @@ policy, not endpoint-specific, and no request shape avoids it. Per plan:
 no code was added for MiMo (swap stopped at the probe); the Spark toggle
   slot was subsequently replaced by Atria (see #18). Legitimate alternatives
 unchanged: paid Zen models (no caller gate), Meta-direct Contributor tier,
-or more OpenRouter `:free` models through the existing Qwen plumbing.
+or more OpenRouter `:free` models through the OpenRouter editing plumbing.
 
 ## 13. Partial note blames "steps" when quota/overload killed the run
 Cause: mid-stream `error` parts were ignored, so any death without

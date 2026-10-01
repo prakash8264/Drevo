@@ -84,7 +84,7 @@ full-project JSON, validate packages/cancellation, commit via `saveAiWorkspace`.
   imageUrl?: string;
   messages?: Message[];
   fileData: FileData;
-  model?: "gemini" | "qwen" | "atria";
+  model?: "gemini" | "nemotron" | "atria";
 }
 ```
 

@@ -20,7 +20,7 @@ flowchart TD
 
 `WorkspaceClient` owns the router and state/refs. Initial prompts always use
 Gemini; follow-ups, regenerate, edited-message resubmission, and preview fixes
-use Gemini/Qwen/Atria as selected. There is no separate privileged Pro editing
+use Gemini/Nemotron/Atria as selected. There is no separate privileged Pro editing
 path; all members/plans can edit when shared credits are available.
 
 ## 2. Providers and dependency pairing
@@ -29,13 +29,27 @@ path; all members/plans can edit when shared credits are available.
 |---|---|---|
 | Initial generation | `@google/genai`, `gemini-3.5-flash` | `GEMINI_API_KEY` |
 | Gemini edits | AI SDK Google provider, `gemini-3.5-flash` | `GEMINI_API_KEY` |
-| Qwen edits | OpenRouter, `qwen/qwen3.8-27b:free` | `OPENROUTER_API_KEY` |
+| Nemotron edits | OpenRouter, `nvidia/nemotron-3-ultra-550b-a55b:free` (NVIDIA: Nemotron 3 Ultra, free) | `OPENROUTER_API_KEY` |
 | Atria edits | OpenAI-compatible Chat Completions, `Atria-Dawn-Preview`, `https://api.atria-asi.ai/v1` | `ATRIA_API_KEY` |
 
 `GEMINI_FALLBACK_MODEL` optionally provides a Gemini-only fallback after overload
-exhaustion. It is not silently used instead of Qwen/Atria. Missing editing keys
+exhaustion. It is not silently used instead of Nemotron/Atria. Missing editing keys
 return `*_NOT_CONFIGURED` before a provider call; arbitrary client model names
 fail validation.
+
+Nemotron replaces the former Qwen slot; clients now send `model: "nemotron"`.
+OpenRouter's public catalog lists the exact free model with `tools` and
+`tool_choice` support. This is catalog verification, not proof of successful
+generation with a deployed key. Its `:free` suffix is intentional; there is no
+paid-model or cross-provider fallback. Successful saved edits still cost one
+**Drevo** organization credit, independent of OpenRouter's free token pricing.
+
+The Nemotron toggle's optional `/api/models/openrouter-budget` display reads
+OpenRouter's account-wide key spending limit in **USD**, not daily free-model
+request counts. Free-model limits still apply and the display never blocks an
+edit. The new key must be set as server-only `OPENROUTER_API_KEY` locally and in
+the relevant Vercel environment; redeploy after changing it. Refresh existing
+browser tabs after deploying the replacement to use the new request model ID.
 
 Current exact pairing: `ai 7.0.109`, `@ai-sdk/google 3.0.125`,
 `@openrouter/ai-sdk-provider 3.1.0`, `@ai-sdk/openai-compatible 3.0.55`.

@@ -17,7 +17,7 @@ Start with the [documentation index](./docs/README.md).
 
 ## Main features
 
-- Gemini first-generation output; Gemini, Qwen, or Atria for follow-up edits.
+- Gemini first-generation output; Gemini, NVIDIA Nemotron 3 Ultra (free), or Atria for follow-up edits.
 - Sandpack preview and source viewer; AI-assisted runtime-error recovery.
 - Organization-owned projects, subscriptions, and shared credits.
 - Clerk authentication, organization invitations, and organization checkout.
