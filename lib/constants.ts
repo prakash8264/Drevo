@@ -30,7 +30,7 @@ export const PRICING_PLANS = [
     planId: null,
     active: true,
     features: [
-      "10 generations / month",
+      "10 trial credits (once per user)",
       "Agent-powered edits",
       "Image uploads",
       "Live preview",
@@ -47,6 +47,7 @@ export const PRICING_PLANS = [
     active: true,
     features: [
       "50 generations / month",
+      "Unused credits roll over",
       "Agent-powered edits",
       "Image uploads",
       "Live preview",
@@ -63,6 +64,7 @@ export const PRICING_PLANS = [
     active: true,
     features: [
       "150 generations / month",
+      "Unused credits roll over",
       "Priority AI (faster response)",
       "Agent-powered edits",
       "Live preview",

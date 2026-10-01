@@ -2,14 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { getActiveOrganization } from "@/lib/org";
-import { getClerk, toClerkRole, toPrismaRole } from "@/lib/clerk";
+import { getClerk, toClerkRole } from "@/lib/clerk";
+import { syncClerkMemberships } from "@/lib/membership-sync";
 
 export const runtime = "nodejs";
 
 const AddSchema = z.object({
   email: z.string().email().max(320),
-  // Drevo role for the invitee. OWNER cannot be granted by invite:
-  // promote to OWNER afterwards from the members dialog instead.
+  // OWNER is a local distinction and cannot be granted by an invitation.
   role: z.enum(["ADMIN", "MEMBER"]).optional().default("MEMBER"),
 });
 
@@ -57,7 +57,7 @@ export async function POST(request: NextRequest) {
   // Already a member (either system)? Don't send a pointless invite.
   const targetUser = await db.user.findUnique({
     where: { email },
-    select: { id: true },
+    select: { id: true, clerkId: true },
   });
   if (targetUser) {
     const existing = await db.organizationMember.findUnique({
@@ -69,8 +69,13 @@ export async function POST(request: NextRequest) {
       },
       select: { id: true },
     });
-    if (existing)
-      return NextResponse.json({ message: "Already a member." }, { status: 409 });
+    if (existing) {
+      try { await syncClerkMemberships(org.clerkOrgId, targetUser.clerkId); }
+      catch { return NextResponse.json({ message: "Could not verify current membership. Please retry." }, { status: 503 }); }
+      if (await db.organizationMember.findUnique({ where: { organizationId_userId: { organizationId: active.organization.id, userId: targetUser.id } } })) {
+        return NextResponse.json({ message: "Already a member." }, { status: 409 });
+      }
+    }
   }
 
   const clerk = await getClerk();
@@ -78,7 +83,7 @@ export async function POST(request: NextRequest) {
   // Clerk-side pre-checks: a pending invite or an existing Clerk membership
   // (diverged from Prisma) both make createOrganizationInvitation 400.
   try {
-    const [invites, members] = await Promise.all([
+    const [invites, members, caller] = await Promise.all([
       clerk.organizations.getOrganizationInvitationList({
         organizationId: org.clerkOrgId,
         status: ["pending"],
@@ -88,7 +93,11 @@ export async function POST(request: NextRequest) {
         organizationId: org.clerkOrgId,
         limit: 100,
       }),
+      clerk.organizations.getOrganizationMembershipList({ organizationId: org.clerkOrgId, userId: [active.clerkId], limit: 1 }),
     ]);
+    if (!caller.data.some((m) => m.publicUserData?.userId === active.clerkId && m.role === "org:admin")) {
+      return NextResponse.json({ message: "Current Clerk administrator access is required." }, { status: 403 });
+    }
     if (invites.data.some((i) => i.emailAddress.toLowerCase() === email)) {
       return NextResponse.json(
         { message: "An invitation is already pending for this email." },
@@ -99,29 +108,8 @@ export async function POST(request: NextRequest) {
       (m) => m.publicUserData?.identifier?.toLowerCase() === email
     );
     if (clerkMember?.publicUserData?.userId) {
-      // Diverged: member in Clerk but not Prisma — self-heal the Prisma row.
-      const user =
-        targetUser ??
-        (await db.user.findUnique({
-          where: { clerkId: clerkMember.publicUserData.userId },
-          select: { id: true },
-        }));
-      if (user) {
-        await db.organizationMember.upsert({
-          where: {
-            organizationId_userId: {
-              organizationId: active.organization.id,
-              userId: user.id,
-            },
-          },
-          update: {},
-          create: {
-            organizationId: active.organization.id,
-            userId: user.id,
-            role: toPrismaRole(clerkMember.role),
-          },
-        });
-      }
+      // Re-read current provider truth under the same lock as every other writer.
+      await syncClerkMemberships(org.clerkOrgId, clerkMember.publicUserData.userId);
       return NextResponse.json(
         { message: "Already a member of this organization (membership synced)." },
         { status: 409 }
@@ -129,7 +117,7 @@ export async function POST(request: NextRequest) {
     }
   } catch (err) {
     console.error("[orgs/members/add] clerk pre-check failed:", err);
-    // Non-fatal: fall through to the create call and surface its error.
+    return NextResponse.json({ message: "Could not verify Clerk membership and invitations. Please retry." }, { status: 503 });
   }
 
   try {

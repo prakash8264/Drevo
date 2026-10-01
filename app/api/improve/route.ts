@@ -2,7 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
-import type { FileData, Message, EditModelId } from "@/types/workspace";
+import type { EditModelId } from "@/types/workspace";
 import {
   getRetryAfterHeader,
   isOverloadedError,
@@ -26,6 +26,7 @@ import {
 } from "./agent-prompts";
 import { createFinishRun, diffPaths } from "./agent-finish";
 import { runAgentWithRetries } from "./agent-run";
+import { ImproveRequestSchema, readAiBody, protectAi, acquireAiLease, aiErrorMessage } from "@/lib/ai-request";
 
 // ─── SSE helper ───────────────────────────────────────────────────────────────
 // Kept local: three lines, used by every enqueue site below.
@@ -46,26 +47,22 @@ export async function POST(request: NextRequest) {
   if (!clerkId)
     return Response.json({ message: "Unauthorized" }, { status: 401 });
 
-  const body = await request.json();
+  const disconnected = new AbortController();
+  const signal = AbortSignal.any([request.signal, disconnected.signal, AbortSignal.timeout(290000)]);
+  const body = await readAiBody(request).catch(() => null);
+  const input = ImproveRequestSchema.safeParse(body);
+  if (!input.success) return Response.json({ message: "Invalid improvement request" }, { status: 400 });
   const {
-    userId,
     workspaceId,
+    revision,
     userRequest,
     imageUrl,
     messages,
     fileData,
     model: requestedModel,
-  } = body as {
-    userId: string;
-    workspaceId: string;
-    userRequest: string; // what the user wants changed (2nd+ chat prompt)
-    imageUrl?: string; // optional screenshot / reference image
-    messages?: Message[]; // full conversation incl. new user message
-    fileData: FileData;
-    // Edit-model toggle from the chat panel. Validated to an allowlist
-    // below — a raw client model string is never passed to any provider.
-    model?: string;
-  };
+  } = input.data;
+  const denied = await protectAi(request, body, clerkId, userRequest);
+  if (denied) return denied;
 
   // Only these edit models exist. Anything else (missing, tampered) falls
   // back to Gemini, which is also the toggle default.
@@ -98,7 +95,7 @@ export async function POST(request: NextRequest) {
 
   const wsOrg = await db.workspace.findUnique({
     where: { id: workspaceId },
-    select: { organizationId: true },
+    select: { organizationId: true, revision: true },
   });
   if (!wsOrg?.organizationId)
     return Response.json({ message: "Workspace not found" }, { status: 404 });
@@ -107,6 +104,7 @@ export async function POST(request: NextRequest) {
   );
   if (!membership)
     return Response.json({ message: "Workspace not found" }, { status: 404 });
+  if (wsOrg.revision !== revision) return Response.json({ message: "Workspace changed. Reload before retrying." }, { status: 409 });
 
   const orgId = wsOrg.organizationId;
   const internalUserId = dbUser.id;
@@ -140,6 +138,9 @@ export async function POST(request: NextRequest) {
   }
   // Short provider name for user-facing error payloads below.
   const providerShort = selected.short;
+  let release: () => Promise<void>;
+  try { release = await acquireAiLease(internalUserId, workspaceId); }
+  catch (error) { return Response.json({ message: error instanceof Error ? error.message : "AI request unavailable" }, { status: 409 }); }
 
   const encoder = new TextEncoder();
 
@@ -165,7 +166,7 @@ export async function POST(request: NextRequest) {
       };
 
       // If the client aborts (Stop button / navigation), stop enqueueing.
-      request.signal.addEventListener("abort", safeClose);
+      signal.addEventListener("abort", safeClose, { once: true });
 
       // Accumulate file patches + new deps as the agent calls tools.
       // These exact objects are shared with the tools factory and the
@@ -204,12 +205,14 @@ export async function POST(request: NextRequest) {
       // (partial save on maxIterations) can use it. Both deduct 1 credit.
       const finishRun = createFinishRun({
         workspaceId,
+        revision,
         orgId,
+        userId: internalUserId,
+        signal,
         userRequest,
         imageUrl,
         messages,
         baseFileData: fileData,
-        orgCredits,
         getState: () => ({
           files: patchedFiles,
           dependencies: patchedDependencies,
@@ -258,9 +261,9 @@ export async function POST(request: NextRequest) {
             instructions: agentInstructions,
             input: agentInput,
             tools,
-            abortSignal: request.signal,
+            abortSignal: signal,
             resetRunState,
-            shouldStop: () => closed || request.signal.aborted,
+            shouldStop: () => closed || signal.aborted,
             enqueue: (type, payload) => safeEnqueue(sseEvent(type, payload)),
           });
         } catch (primaryErr) {
@@ -268,9 +271,9 @@ export async function POST(request: NextRequest) {
           if (
             editModel === "gemini" &&
             fallback &&
-            isOverloadedError(primaryErr) &&
+            (isOverloadedError(primaryErr) || (primaryErr instanceof MaxIterationsError && primaryErr.reason === "overload")) &&
             !closed &&
-            !request.signal.aborted
+            !signal.aborted
           ) {
             console.error(
               `[improve] primary exhausted, falling back to ${fallback}`
@@ -287,9 +290,9 @@ export async function POST(request: NextRequest) {
               instructions: agentInstructions,
               input: agentInput,
               tools,
-              abortSignal: request.signal,
+              abortSignal: signal,
               resetRunState,
-              shouldStop: () => closed || request.signal.aborted,
+              shouldStop: () => closed || signal.aborted,
               enqueue: (type, payload) =>
                 safeEnqueue(sseEvent(type, payload)),
             });
@@ -299,7 +302,11 @@ export async function POST(request: NextRequest) {
         }
         // null = aborted mid-run; the controller is already dead, just exit.
         if (run === null) return;
+        signal.throwIfAborted();
         const { steps, finalText, streamError } = run;
+        if (streamError !== null && isQuotaError(streamError)) {
+          throw new MaxIterationsError("quota", streamErrorText(streamError), getRetryAfterHeader(streamError));
+        }
 
         // ── Classify the outcome ───────────────────────────────────────────
         // The AI SDK loop ends without calling done_improving when the step
@@ -313,13 +320,6 @@ export async function POST(request: NextRequest) {
           )
         );
         if (!doneCalled) {
-          if (streamError !== null && isQuotaError(streamError)) {
-            throw new MaxIterationsError(
-              "quota",
-              streamErrorText(streamError),
-              getRetryAfterHeader(streamError)
-            );
-          }
           if (streamError !== null && isOverloadedError(streamError)) {
             throw new MaxIterationsError(
               "overload",
@@ -338,12 +338,14 @@ export async function POST(request: NextRequest) {
           JSON.stringify(fileData.dependencies);
         if (runChangedPaths.length === 0 && !runDepsChanged) {
           const noOpSummary = finalSummary || finalText || "Done.";
+          const currentOrg = await db.organization.findUnique({ where: { id: orgId }, select: { credits: true } });
           safeEnqueue(
             sseEvent("done", {
               fileData,
               summary: noOpSummary,
               partial: false,
-              creditsRemaining: orgCredits,
+              revision,
+              creditsRemaining: currentOrg?.credits ?? orgCredits,
             })
           );
           return;
@@ -352,7 +354,9 @@ export async function POST(request: NextRequest) {
         await finishRun(finalSummary || finalText || "Done.", false);
       } catch (err) {
         console.error(`[improve:${selected.label}] error:`, err);
-        if (isQuotaError(err)) {
+        if (err instanceof Error && err.message.endsWith("No credits were deducted.")) {
+          safeEnqueue(sseEvent("error", { message: aiErrorMessage(err) }));
+        } else if (isQuotaError(err)) {
           safeEnqueue(
             sseEvent("error", quotaErrorPayload(err, providerShort))
           );
@@ -400,7 +404,7 @@ export async function POST(request: NextRequest) {
               safeEnqueue(
                 sseEvent("error", {
                   message:
-                    "This edit was too large to finish in one go. Try a smaller, more specific request (one section at a time). No credits were deducted.",
+                    aiErrorMessage(saveErr),
                   code: "MAX_ITERATIONS",
                 })
               );
@@ -440,14 +444,17 @@ export async function POST(request: NextRequest) {
           safeEnqueue(
             sseEvent("error", {
               message:
-                err instanceof Error ? err.message : "Something went wrong.",
+                aiErrorMessage(err),
             })
           );
         }
       } finally {
+        await release();
+        signal.removeEventListener("abort", safeClose);
         safeClose();
       }
     },
+    cancel() { disconnected.abort(); },
   });
 
   return new Response(stream, {

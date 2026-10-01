@@ -4,8 +4,8 @@ import { GoogleGenAI } from "@google/genai";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
 import type { Message, FileData } from "@/types/workspace";
-import { aj } from "@/lib/arcjet";
-import { pruneVersions } from "@/actions/versions";
+import { GenerateRequestSchema, GeneratedOutputSchema, readAiBody, protectAi, acquireAiLease, aiErrorMessage, validateApp } from "@/lib/ai-request";
+import { saveAiWorkspace } from "@/lib/workspace-save";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
@@ -183,49 +183,21 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
-  const { workspaceId, userId, messages, fileData } = body as {
-    workspaceId: string | null;
-    userId: string;
-    messages: Message[];
-    fileData: FileData | null;
-  };
-
-  if (!messages?.length) {
-    return Response.json({ message: "No messages provided" }, { status: 400 });
-  }
+  const disconnected = new AbortController();
+  const signal = AbortSignal.any([request.signal, disconnected.signal, AbortSignal.timeout(290000)]);
+  const body = await readAiBody(request).catch(() => null);
+  const input = GenerateRequestSchema.safeParse(body);
+  if (!input.success) return Response.json({ message: "Invalid generation request" }, { status: 400 });
+  const { workspaceId, revision, orgId: requestedOrgId, messages, fileData } = input.data;
 
   // ── Arcjet: per-user rate limit + prompt-injection screen ────────────────
   // Denials are free friendly refusals (no credit, no agent run).
   // detectPromptInjectionMessage requires the actual user text to inspect.
 
-  const arcjetReq = new Request(request.url, {
-    method: request.method,
-    headers: request.headers,
-    body: JSON.stringify(body),
-  });
-
   const lastUserMessage =
     [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  const decision = await aj.protect(arcjetReq, {
-    requested: 1,
-    userId: clerkId,
-    detectPromptInjectionMessage: lastUserMessage,
-  });
-
-  if (decision.isDenied()) {
-    const reasonType = String(decision.reason?.type ?? "");
-    const isInjection = /prompt.injection/i.test(reasonType);
-    return Response.json(
-      {
-        message: isInjection
-          ? "I can't help with that request. Try describing the app you want to build instead."
-          : "Too many requests. Please slow down.",
-        code: isInjection ? "REFUSED" : "RATE_LIMITED",
-      },
-      { status: 429 }
-    );
-  }
+  const denied = await protectAi(request, body, clerkId, lastUserMessage);
+  if (denied) return denied;
 
   const user = await db.user.findUnique({
     where: { clerkId },
@@ -249,11 +221,10 @@ export async function POST(request: NextRequest) {
   // Resolve org: update branch → workspace's org + membership check;
   // create branch → active org + OWNER/ADMIN required.
   let orgId: string;
-  let orgRole: string | null = null;
   if (workspaceId) {
     const ws = await db.workspace.findUnique({
       where: { id: workspaceId },
-      select: { id: true, organizationId: true },
+      select: { id: true, organizationId: true, revision: true },
     });
     if (!ws?.organizationId)
       return Response.json({ message: "Workspace not found" }, { status: 404 });
@@ -263,7 +234,7 @@ export async function POST(request: NextRequest) {
     if (!m)
       return Response.json({ message: "Workspace not found" }, { status: 404 });
     orgId = ws.organizationId;
-    orgRole = m.role;
+    if (ws.revision !== revision) return Response.json({ message: "Workspace changed. Reload before retrying." }, { status: 409 });
   } else {
     const active =
       user.memberships.find(
@@ -276,7 +247,7 @@ export async function POST(request: NextRequest) {
       );
     }
     orgId = active.organization.id;
-    orgRole = active.role;
+    if (orgId !== requestedOrgId) return Response.json({ message: "Organization changed. Reload before creating a project." }, { status: 409 });
   }
 
   const org = await db.organization.findUnique({
@@ -289,6 +260,9 @@ export async function POST(request: NextRequest) {
     return Response.json({ message: "Insufficient credits" }, { status: 402 });
   }
   const internalUserId = user.id;
+  let release: () => Promise<void>;
+  try { release = await acquireAiLease(internalUserId, workspaceId); }
+  catch (error) { return Response.json({ message: error instanceof Error ? error.message : "AI request unavailable" }, { status: 409 }); }
 
   const encoder = new TextEncoder();
 
@@ -314,14 +288,14 @@ export async function POST(request: NextRequest) {
       };
 
       // If the client aborts (Stop button / navigation), stop enqueueing.
-      request.signal.addEventListener("abort", safeClose);
+      signal.addEventListener("abort", safeClose, { once: true });
 
       // Sleep that wakes early on client abort (Stop button / navigation).
       const sleepOrAbort = (ms: number) =>
         new Promise<"slept" | "aborted">((resolve) => {
-          if (request.signal.aborted) return resolve("aborted");
+          if (signal.aborted) return resolve("aborted");
           const timer = setTimeout(() => resolve("slept"), ms);
-          request.signal.addEventListener(
+          signal.addEventListener(
             "abort",
             () => {
               clearTimeout(timer);
@@ -335,7 +309,7 @@ export async function POST(request: NextRequest) {
         Math.min(8000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 1000);
 
       try {
-        const contents = buildContents(messages, fileData);
+        const contents = buildContents(messages, fileData ?? null);
 
         // ── Retried generation ─────────────────────────────────────────
         // Google sheds load with 503 UNAVAILABLE both at call time and
@@ -347,6 +321,7 @@ export async function POST(request: NextRequest) {
         const MAX_ATTEMPTS = 3;
         const runStream = async (modelName: string): Promise<string | null> => {
           for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            if (closed || signal.aborted) return null;
             // Tracks whether any chunk arrived, so the log can tell an
             // at-call rejection apart from a mid-stream shed.
             let sawChunks = false;
@@ -355,6 +330,7 @@ export async function POST(request: NextRequest) {
                 model: modelName,
                 contents,
                 config: {
+                  abortSignal: signal,
                   systemInstruction: SYSTEM_PROMPT,
                   temperature: 0.7,
                   responseMimeType: "application/json",
@@ -368,7 +344,7 @@ export async function POST(request: NextRequest) {
               let lastEmitTime = 0; // throttle thought emissions
 
               for await (const chunk of geminiStream) {
-                if (closed || request.signal.aborted) break;
+                if (closed || signal.aborted) break;
                 sawChunks = true;
                 const parts = chunk.candidates?.[0]?.content?.parts ?? [];
 
@@ -392,7 +368,7 @@ export async function POST(request: NextRequest) {
                 }
               }
 
-              if (closed || request.signal.aborted) return null;
+              if (closed || signal.aborted) return null;
               return accumulated;
             } catch (streamErr) {
               const last = attempt === MAX_ATTEMPTS;
@@ -400,7 +376,7 @@ export async function POST(request: NextRequest) {
                 `[gen-ai-code] attempt ${attempt}/${MAX_ATTEMPTS} failed (${sawChunks ? "mid-stream" : "at-call"}):`,
                 streamErr
               );
-              if (closed || request.signal.aborted) return null;
+              if (closed || signal.aborted) return null;
               if (!isOverloadedError(streamErr) || last) throw streamErr;
               safeEnqueue(
                 sseEvent("status", {
@@ -426,7 +402,7 @@ export async function POST(request: NextRequest) {
             fallback &&
             isOverloadedError(primaryErr) &&
             !closed &&
-            !request.signal.aborted
+            !signal.aborted
           ) {
             console.error(
               `[gen-ai-code] primary exhausted, falling back to ${fallback}`
@@ -454,11 +430,11 @@ export async function POST(request: NextRequest) {
         };
 
         try {
-          parsed = JSON.parse(accumulated);
+          parsed = GeneratedOutputSchema.parse(JSON.parse(accumulated));
         } catch {
           safeEnqueue(
             sseEvent("error", {
-              message: "AI returned invalid JSON. Please try again.",
+              message: "AI returned an invalid project response. Please try again. No credits were deducted.",
             })
           );
           return;
@@ -471,14 +447,7 @@ export async function POST(request: NextRequest) {
           dependencies,
         } = parsed;
 
-        if (!files || typeof files !== "object") {
-          safeEnqueue(
-            sseEvent("error", {
-              message: "AI response missing files. Please try again.",
-            })
-          );
-          return;
-        }
+        validateApp({ files, dependencies, title: aiTitle });
 
         // ── Validate npm packages ──────────────────────────────────────────────
 
@@ -489,6 +458,8 @@ export async function POST(request: NextRequest) {
           dependencies: validatedDeps,
           title: aiTitle,
         };
+        signal.throwIfAborted();
+        if (closed) return;
 
         // ── Upsert workspace + deduct ORG credit (single guarded transaction) ──
         // updateMany with credits>=cost makes concurrent spends atomic:
@@ -502,79 +473,19 @@ export async function POST(request: NextRequest) {
           { role: "assistant", content: assistantMessage },
         ];
 
-        // Snapshot the pre-run files so the edit stays restorable.
-        // body fileData is the state before this run (null on first prompt).
-        let workspace: { id: string };
-        try {
-          workspace = await db.$transaction(async (tx) => {
-            let ws: { id: string };
-            if (workspaceId) {
-              ws = await tx.workspace.update({
-                where: { id: workspaceId },
-                data: {
-                  messages: updatedMessages as never,
-                  fileData: newFileData as never,
-                },
-              });
-            } else {
-              ws = await tx.workspace.create({
-                data: {
-                  organizationId: orgId,
-                  createdById: internalUserId,
-                  title: aiTitle ?? lastUserMessage.content.slice(0, 80),
-                  messages: updatedMessages as never,
-                  fileData: newFileData as never,
-                },
-              });
-            }
-            if (workspaceId && fileData) {
-              await tx.workspaceVersion.create({
-                data: {
-                  workspaceId,
-                  fileData: fileData as never,
-                  summary: assistantMessage.slice(0, 120),
-                },
-              });
-            }
-            const creditRes = await tx.organization.updateMany({
-              where: {
-                id: orgId,
-                credits: { gte: CREDIT_COST_PER_GENERATION },
-              },
-              data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
-            });
-            if (creditRes.count === 0) throw new Error("INSUFFICIENT_CREDITS");
-            return ws;
-          });
-        } catch (txErr) {
-          if (
-            txErr instanceof Error &&
-            txErr.message === "INSUFFICIENT_CREDITS"
-          ) {
-            safeEnqueue(
-              sseEvent("error", { message: "Insufficient credits" })
-            );
-            return;
-          }
-          throw txErr;
-        }
-
-        if (workspaceId) await pruneVersions(workspaceId);
-
-        const updatedOrg = await db.organization.findUnique({
-          where: { id: orgId },
-          select: { credits: true },
+        const saved = await saveAiWorkspace({
+          workspaceId, revision, orgId, userId: internalUserId, signal,
+          fileData: newFileData, messages: updatedMessages,
+          title: aiTitle ?? lastUserMessage.content.slice(0, 80), summary: assistantMessage,
         });
 
         // ── Emit final result ──────────────────────────────────────────────────
 
         safeEnqueue(
           sseEvent("done", {
-            workspaceId: workspace.id,
+            ...saved,
             assistantMessage,
             fileData: newFileData,
-            creditsRemaining:
-              updatedOrg?.credits ?? org.credits - CREDIT_COST_PER_GENERATION,
           })
         );
       } catch (err) {
@@ -586,14 +497,17 @@ export async function POST(request: NextRequest) {
         } else {
           safeEnqueue(
             sseEvent("error", {
-              message: "Something went wrong. Please try again.",
+              message: aiErrorMessage(err),
             })
           );
         }
       } finally {
+        await release();
+        signal.removeEventListener("abort", safeClose);
         safeClose();
       }
     },
+    cancel() { disconnected.abort(); },
   });
 
   return new Response(stream, {

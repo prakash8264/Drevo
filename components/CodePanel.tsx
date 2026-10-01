@@ -279,6 +279,7 @@ function SandpackInner({
         pushedAt: new Date().toISOString(),
       });
       toast.success(outcome.result.unchanged ? "Already up to date on GitHub." : "GitHub updated.");
+      if (outcome.result.trackingSaved === false) toast.warning("GitHub was updated, but Drevo could not save push history. Check the repository before retrying.");
     } finally {
       setIsUpdating(false);
     }

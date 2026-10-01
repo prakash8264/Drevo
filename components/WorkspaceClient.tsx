@@ -15,6 +15,7 @@ import { MIN_CREDITS_TO_GENERATE } from "@/lib/constants";
 import { emitCredits } from "@/lib/credits-bus";
 import { getVersions, restoreVersion } from "@/actions/versions";
 import { toast } from "sonner";
+import { useRouter } from "next/navigation";
 import type {
   Message,
   FileData,
@@ -68,6 +69,7 @@ export function WorkspaceClient({
   githubConnected: initialGithubConnected,
   githubUsername: initialGithubUsername,
 }: WorkspaceClientProps) {
+  const router = useRouter();
   const [workspaceId, setWorkspaceId] = useState<string | null>(
     workspace?.id ?? null
   );
@@ -78,6 +80,12 @@ export function WorkspaceClient({
     parseFileData(workspace?.fileData)
   );
   const [credits, setCredits] = useState(userCredits);
+  const [prevUserCredits, setPrevUserCredits] = useState(userCredits);
+  const revisionRef = useRef(workspace?.revision ?? 0);
+  if (prevUserCredits !== userCredits) {
+    setPrevUserCredits(userCredits);
+    setCredits(userCredits);
+  }
   const creditsRef = useRef(userCredits);
   useEffect(() => {
     creditsRef.current = credits;
@@ -86,8 +94,8 @@ export function WorkspaceClient({
   const applyCredits = useCallback((next: number) => {
     creditsRef.current = next;
     setCredits(next);
-    emitCredits(next);
-  }, []);
+    emitCredits(next, orgId);
+  }, [orgId]);
 
   const decrementOptimistic = useCallback(() => {
     applyCredits(creditsRef.current - 1);
@@ -167,6 +175,10 @@ export function WorkspaceClient({
   // AbortController refs — used to cancel in-flight streams
   const generateAbortRef = useRef<AbortController | null>(null);
   const improveAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    generateAbortRef.current?.abort();
+    improveAbortRef.current?.abort();
+  }, []);
 
   // Refs to avoid stale closures in callbacks
   const messagesRef = useRef<Message[]>(messages);
@@ -244,7 +256,8 @@ export function WorkspaceClient({
       const id = workspaceIdRef.current;
       if (!id || isGenerating || isImproving) return;
       try {
-        const detail = await restoreVersion(id, versionId);
+        const detail = await restoreVersion(id, versionId, revisionRef.current);
+        revisionRef.current = detail.revision;
         setFileData(detail.fileData);
         refreshVersions();
         toast.success("Version restored. Continue chatting to iterate.");
@@ -284,7 +297,7 @@ export function WorkspaceClient({
 
   const handleGenerate = useCallback(
     async (prompt: string, imageUrl?: string, opts?: RunOpts) => {
-      if (isGenerating) return;
+      if (isGenerating || isImproving || generateAbortRef.current || improveAbortRef.current) return;
       if (credits < MIN_CREDITS_TO_GENERATE) return;
       // MEMBERs cannot create new projects (server enforces 403 too).
       if (!workspaceIdRef.current && userRole === "MEMBER") {
@@ -308,6 +321,7 @@ export function WorkspaceClient({
       // Optimistic -1 so header + chat counts drop on Enter.
       // Authoritative value from SSE "done" reconciles it; failures refund below.
       let charged = false;
+      let confirmed = false;
       decrementOptimistic();
       charged = true;
 
@@ -326,6 +340,8 @@ export function WorkspaceClient({
           signal: abortController.signal,
           body: JSON.stringify({
             workspaceId: currentWorkspaceId,
+            revision: revisionRef.current,
+            orgId,
             userId,
             messages: conversationHistory,
             fileData: fileDataRef.current,
@@ -388,6 +404,7 @@ export function WorkspaceClient({
               code?: string;
               retryAfter?: number;
               workspaceId?: string;
+              revision?: number;
               fileData?: FileData;
               creditsRemaining?: number;
               assistantMessage?: string;
@@ -401,8 +418,11 @@ export function WorkspaceClient({
             if (event.type === "status") {
               pushStep(event.message ?? "Working…");
             } else if (event.type === "done") {
+              confirmed = true;
               completeSteps();
               setWorkspaceId(event.workspaceId ?? null);
+              workspaceIdRef.current = event.workspaceId ?? null;
+              if (typeof event.revision === "number") revisionRef.current = event.revision;
               if (event.fileData) setFileData(event.fileData);
               applyAuthoritative(
                 event.creditsRemaining,
@@ -438,6 +458,7 @@ export function WorkspaceClient({
             }
           }
         }
+        if (charged) throw new Error("Connection ended before completion was confirmed. Reload to check the saved project.");
       } catch (err) {
         // User-initiated stop — silently roll back the user message
         // (only when this run appended one — regenerate keeps history)
@@ -471,6 +492,9 @@ export function WorkspaceClient({
           charged = false;
         }
       } finally {
+        // An interrupted response may have lost its done event after commit.
+        // Re-read server truth rather than trusting an optimistic refund.
+        if (!confirmed) router.refresh();
         generateAbortRef.current = null;
         setIsGenerating(false);
         setStatusLog([]);
@@ -480,12 +504,15 @@ export function WorkspaceClient({
     [
       credits,
       isGenerating,
+      isImproving,
       userId,
       userRole,
+      orgId,
       refreshVersions,
       decrementOptimistic,
       refundOptimistic,
       applyAuthoritative,
+      router,
     ]
   );
 
@@ -493,7 +520,7 @@ export function WorkspaceClient({
   // First prompt (no workspace/fileData yet) still uses handleGenerate.
   const handleImprove = useCallback(
     async (userRequest: string, imageUrl?: string, opts?: RunOpts) => {
-      if (isGenerating || isImproving) return;
+      if (isGenerating || isImproving || generateAbortRef.current || improveAbortRef.current) return;
       if (credits < MIN_CREDITS_TO_GENERATE) return;
       if (!workspaceIdRef.current) return;
 
@@ -537,6 +564,7 @@ export function WorkspaceClient({
       improveAbortRef.current = abortController;
       // Optimistic -1 so header + chat counts drop on Enter (reconciled at done).
       let charged = false;
+      let confirmed = false;
       decrementOptimistic();
       charged = true;
 
@@ -548,6 +576,7 @@ export function WorkspaceClient({
           body: JSON.stringify({
             userId,
             workspaceId: workspaceIdRef.current,
+            revision: revisionRef.current,
             userRequest,
             ...(imageUrl ? { imageUrl } : {}),
             messages: conversationHistory,
@@ -617,6 +646,7 @@ export function WorkspaceClient({
               fileData?: FileData;
               summary?: string;
               partial?: boolean;
+              revision?: number;
               creditsRemaining?: number;
               message?: string;
               retryAfter?: number;
@@ -643,8 +673,10 @@ export function WorkspaceClient({
               // Accumulate locally — don't touch state yet
               if (event.path) localPatches[event.path] = { code: event.code as unknown as string };
             } else if (event.type === "done") {
+              confirmed = true;
               // Apply all patches at once now that the stream is complete
               if (event.fileData) setFileData(event.fileData);
+              if (typeof event.revision === "number") revisionRef.current = event.revision;
               applyAuthoritative(event.creditsRemaining, creditsRef.current);
               charged = false;
               // Replace thinking text with clean summary
@@ -682,6 +714,7 @@ export function WorkspaceClient({
             }
           }
         }
+        if (charged) throw new Error("Connection ended before completion was confirmed. Reload to check the saved project.");
       } catch (err) {
         // User-initiated stop — silently roll back what this run added
         if (err instanceof Error && err.name === "AbortError") {
@@ -709,6 +742,7 @@ export function WorkspaceClient({
           charged = false;
         }
       } finally {
+        if (!confirmed) router.refresh();
         improveAbortRef.current = null;
         setIsImproving(false);
         // Qwen free-pool numbers move every run — refresh the toggle display.
@@ -727,6 +761,7 @@ export function WorkspaceClient({
       decrementOptimistic,
       refundOptimistic,
       applyAuthoritative,
+      router,
     ]
   );
 

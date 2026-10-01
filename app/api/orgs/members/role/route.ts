@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
 import { getActiveOrganization } from "@/lib/org";
+import { getClerk, toClerkRole } from "@/lib/clerk";
 
 export const runtime = "nodejs";
 
@@ -10,9 +11,8 @@ const PatchSchema = z.object({
   role: z.enum(["ADMIN", "MEMBER"]),
 });
 
-// OWNER/ADMIN changes a member's role (OWNER transfer via promotion happens
-// implicitly: promoting a second OWNER first, then the old OWNER steps down).
-// Rules: never demote/remove the sole OWNER; nobody changes their own role.
+// OWNER/ADMIN changes ADMIN/MEMBER roles. Ownership transfer is not exposed.
+// Never demote an OWNER; nobody changes their own role.
 export async function PATCH(request: NextRequest) {
   const active = await getActiveOrganization();
   if (active.role !== "OWNER" && active.role !== "ADMIN") {
@@ -31,7 +31,7 @@ export async function PATCH(request: NextRequest) {
 
   const target = await db.organizationMember.findFirst({
     where: { id: parsed.data.memberId, organizationId: active.organization.id },
-    select: { id: true, role: true, userId: true },
+    select: { id: true, role: true, userId: true, user: { select: { clerkId: true } } },
   });
   if (!target)
     return NextResponse.json({ message: "Member not found" }, { status: 404 });
@@ -45,26 +45,28 @@ export async function PATCH(request: NextRequest) {
   if (active.role === "ADMIN" && target.role === "OWNER") {
     return NextResponse.json({ message: "Forbidden" }, { status: 403 });
   }
-  if (target.role === parsed.data.role) {
-    return NextResponse.json({ ok: true });
-  }
 
-  // Demoting an OWNER: refuse when they are the last one.
+  // Ownership transfer is not supported by this ADMIN/MEMBER-only endpoint.
   if (target.role === "OWNER") {
-    const owners = await db.organizationMember.count({
-      where: { organizationId: active.organization.id, role: "OWNER" },
-    });
-    if (owners <= 1) {
-      return NextResponse.json(
-        { message: "Promote another OWNER first — an organization must keep one." },
-        { status: 409 }
-      );
-    }
+    return NextResponse.json({ message: "OWNER roles cannot be changed by this endpoint." }, { status: 409 });
   }
 
-  await db.organizationMember.update({
-    where: { id: target.id },
-    data: { role: parsed.data.role },
-  });
+  try {
+    const clerk = await getClerk();
+    await db.$transaction(async (tx) => {
+      const [org] = await tx.$queryRaw<{ clerkOrgId: string | null }[]>`SELECT "clerkOrgId" FROM "Organization" WHERE "id" = ${active.organization.id} FOR UPDATE`;
+      if (!org?.clerkOrgId) throw new Error("Organization is not linked to Clerk.");
+      const caller = await tx.organizationMember.findUnique({ where: { id: active.membership.id } });
+      const fresh = await tx.organizationMember.findUnique({ where: { id: target.id } });
+      if (!caller || !["OWNER", "ADMIN"].includes(caller.role) || !fresh || fresh.role === "OWNER") throw new Error("Member permissions changed. Reload and try again.");
+      const currentCaller = await clerk.organizations.getOrganizationMembershipList({ organizationId: org.clerkOrgId, userId: [active.clerkId], limit: 1 });
+      if (!currentCaller.data.some((m) => m.publicUserData?.userId === active.clerkId && m.role === "org:admin")) throw new Error("Clerk administrator access is required");
+      await clerk.organizations.updateOrganizationMembership({ organizationId: org.clerkOrgId, userId: target.user.clerkId, role: toClerkRole(parsed.data.role) });
+      await tx.organizationMember.update({ where: { id: target.id }, data: { role: parsed.data.role } });
+    }, { timeout: 20000 });
+  } catch (error) {
+    console.error("[orgs/members/role] Clerk-first role change failed:", error);
+    return NextResponse.json({ message: "Could not update the member role. Please retry." }, { status: 503 });
+  }
   return NextResponse.json({ ok: true });
 }

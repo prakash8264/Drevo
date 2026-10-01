@@ -187,11 +187,13 @@ test("personal workspace provisioning also makes its actual Clerk user the creat
     "@clerk/nextjs/server": { auth: async () => ({}) }, react: { cache: (fn) => fn },
     "next/navigation": { redirect() { throw new Error("Unexpected redirect"); } },
     "@/lib/constants": { PLANS: { free: { credits: 10 } } },
+    "@/lib/validation": { requireId() {} },
     "@/lib/prisma": { db: {
       user: { findUnique: async () => ({ id: "db_user", clerkId: "user_owner", name: "Gupta", memberships: [], activeOrganizationId: null }) },
       $transaction: (fn) => fn({
+        $queryRaw: async () => [],
         organizationMember: { findFirst: async () => null, create: async () => {} },
-        organization: { create: async () => ({ id: "db_org" }) }, user: { update: async () => {} },
+        organization: { create: async () => ({ id: "db_org" }) }, user: { update: async () => {}, updateMany: async () => ({ count: 1 }) },
       }),
       organization: { update: async (args) => calls.push(plain(args)) },
     } },

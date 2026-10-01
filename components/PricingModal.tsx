@@ -103,9 +103,9 @@ export function PricingModal({
   };
 
   const activePlanKey = orgPlan ?? (isSignedIn
-    ? has?.({ plan: "proorg" })
+    ? has?.({ plan: "org:proorg" })
       ? "pro"
-      : has?.({ plan: "starterorg" })
+      : has?.({ plan: "org:starterorg" })
       ? "starter"
       : "free"
     : null);

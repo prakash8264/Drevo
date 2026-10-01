@@ -25,6 +25,7 @@ export interface StatusStep {
 
 export interface WorkspaceData {
   id: string;
+  revision: number;
   title: string | null;
   messages: unknown;
   fileData: unknown;

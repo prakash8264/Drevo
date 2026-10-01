@@ -5,7 +5,7 @@ import { Zap } from "lucide-react";
 import { PricingModal } from "@/components/PricingModal";
 import { subscribeCredits } from "@/lib/credits-bus";
 
-export function HeaderCredits({ initial, orgPlan = null, orgRole = null }: { initial: number; orgPlan?: string | null; orgRole?: string | null }) {
+export function HeaderCredits({ initial, orgId, orgPlan = null, orgRole = null }: { initial: number; orgId: string; orgPlan?: string | null; orgRole?: string | null }) {
   const [credits, setCredits] = useState(initial);
   const [prevInitial, setPrevInitial] = useState(initial);
 
@@ -16,7 +16,7 @@ export function HeaderCredits({ initial, orgPlan = null, orgRole = null }: { ini
   }
 
   // Live updates from WorkspaceClient (optimistic -1 on submit, authoritative on done)
-  useEffect(() => subscribeCredits(setCredits), []);
+  useEffect(() => subscribeCredits(orgId, setCredits), [orgId]);
 
   return (
     <PricingModal orgPlan={orgPlan} orgRole={orgRole}>

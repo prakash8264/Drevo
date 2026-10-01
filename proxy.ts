@@ -36,7 +36,8 @@ export default clerkMiddleware(async (auth, req) => {
     host.startsWith("127.0.0.1") ||
     host.startsWith("[::1]");
 
-  if (!isLocalhost) {
+  // Svix deliveries are machine traffic; the route verifies signed raw bytes.
+  if (!isLocalhost && req.nextUrl.pathname !== "/api/webhooks/clerk") {
     const decision = await aj.protect(req);
     if (decision.isDenied()) {
       console.warn(

@@ -10,7 +10,7 @@ export default async function WorkspacePage({
 }: WorkspacePageProps) {
   const { prompt, id } = await searchParams;
 
-  const user = await getWorkspaceUser();
+  const user = await getWorkspaceUser(id);
 
   let workspace = null;
   if (id) {
@@ -19,6 +19,7 @@ export default async function WorkspacePage({
 
   return (
     <WorkspaceClient
+      key={`${user.orgId}:${workspace?.id ?? "new"}:${workspace?.revision ?? 0}`}
       initialPrompt={prompt ?? null}
       workspace={workspace}
       userCredits={user.credits}

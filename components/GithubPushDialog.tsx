@@ -232,6 +232,7 @@ export function GithubPushDialog({
     setJustPushed(push);
     onPushed(push);
     toast.success(outcome.result.unchanged ? "Already up to date on GitHub." : "Pushed to GitHub.");
+    if (outcome.result.trackingSaved === false) toast.warning("GitHub push succeeded, but Drevo could not save push history. Check the repository before retrying.");
     return true;
   };
 

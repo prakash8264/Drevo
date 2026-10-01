@@ -97,10 +97,10 @@ export default function LandingPage() {
           }}
         />
 
-        <Badge variant="outline" className="gap-2 p-4 backdrop-blur-sm">
+        {/* <Badge variant="outline" className="gap-2 p-4 backdrop-blur-sm">
           <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
           Powered by Agentic AI
-        </Badge>
+        </Badge> */}
 
         <h1 className="mx-auto max-w-3xl text-balance font-serif text-5xl leading-tight tracking-tight sm:text-6xl lg:text-7xl z-10">
           <GrayTitle>Dream it.</GrayTitle>

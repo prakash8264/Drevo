@@ -1,4 +1,5 @@
 import type { FileData } from "@/types/workspace";
+import { isSafeFilePath } from "@/lib/validation";
 
 // Base dependencies bundled into every export (mirrors CodePanel).
 export const BASE_DEPENDENCIES: Record<string, string> = {
@@ -46,6 +47,7 @@ export interface ProjectFileInput {
 }
 
 function toRepoPath(filePath: string): string {
+  if (!isSafeFilePath(filePath)) throw new Error("Unsafe project file path");
   return filePath.startsWith("/") ? `src${filePath}` : `src/${filePath}`;
 }
 

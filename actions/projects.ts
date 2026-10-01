@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/prisma";
 import { getActiveOrganization } from "@/lib/org";
 import type { ProjectSummary } from "@/types/project";
+import { requireId } from "@/lib/validation";
 
 export type { ProjectSummary } from "@/types/project";
 
@@ -52,6 +53,7 @@ export async function getUserProjects(): Promise<ProjectSummary[]> {
 // ─── Delete a workspace (OWNER/ADMIN only, org-scoped) ───────────────────────
 
 export async function deleteProject(workspaceId: string): Promise<void> {
+  requireId(workspaceId, "workspace ID");
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
@@ -61,7 +63,7 @@ export async function deleteProject(workspaceId: string): Promise<void> {
   }
 
   await db.workspace.deleteMany({
-    where: { id: workspaceId, organizationId: active.organization.id },
+    where: { id: workspaceId, organizationId: active.organization.id, organization: { members: { some: { userId: active.userId, role: { in: ["OWNER", "ADMIN"] } } } } },
   });
 
   revalidatePath("/projects");

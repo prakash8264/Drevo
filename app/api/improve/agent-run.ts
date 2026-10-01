@@ -129,6 +129,7 @@ export async function runAgentWithRetries(args: AgentRunArgs) {
       if (args.shouldStop()) return null;
       const steps = await result.steps;
       const finalText = await result.text;
+      if (streamError !== null && isOverloadedError(streamError)) throw streamError;
       return { steps, finalText, streamError };
     } catch (streamErr) {
       const last = attempt === MAX_ATTEMPTS;
@@ -140,20 +141,12 @@ export async function runAgentWithRetries(args: AgentRunArgs) {
       // Transport-level death (e.g. NoOutputGeneratedError) with a captured
       // error part: the stream, not the budget, killed the run — classify
       // honestly instead of retrying blindly or erroring generic.
-              if (streamError !== null && isQuotaError(streamError)) {
-                throw new MaxIterationsError(
-                  "quota",
-                  streamErrorText(streamError),
-                  getRetryAfterHeader(streamError)
-                );
-              }
-      if (streamError !== null && isOverloadedError(streamError)) {
-        throw new MaxIterationsError(
-          "overload",
-          streamErrorText(streamError)
-        );
+      if (streamError !== null && isQuotaError(streamError)) {
+        throw new MaxIterationsError("quota", streamErrorText(streamError), getRetryAfterHeader(streamError));
       }
-      if (!isOverloadedError(streamErr) || last) throw streamErr;
+      const failure = streamError !== null && isOverloadedError(streamError) ? streamError : streamErr;
+      if (!isOverloadedError(failure)) throw streamErr;
+      if (last) throw new MaxIterationsError("overload", streamErrorText(failure));
       args.enqueue("status", {
         message: `Model busy — retrying… (attempt ${attempt + 1}/${MAX_ATTEMPTS})`,
       });

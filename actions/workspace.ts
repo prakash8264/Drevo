@@ -5,12 +5,14 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/prisma";
 import { ensurePersonalOrganization } from "@/lib/org";
 import type { WorkspaceUser, WorkspaceData } from "@/types/workspace";
+import { requireId } from "@/lib/validation";
 
 export type { WorkspaceUser, WorkspaceData } from "@/types/workspace";
 
 // ─── Get the current authenticated user + active org ─────────────────────────
 
-export async function getWorkspaceUser(): Promise<WorkspaceUser> {
+export async function getWorkspaceUser(workspaceId?: string): Promise<WorkspaceUser> {
+  if (workspaceId !== undefined) requireId(workspaceId, "workspace ID");
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
@@ -37,17 +39,22 @@ export async function getWorkspaceUser(): Promise<WorkspaceUser> {
 
   if (user.memberships.length === 0) {
     await ensurePersonalOrganization(user.id);
-    return getWorkspaceUser();
+    return getWorkspaceUser(workspaceId);
   }
 
-  let pick = user.memberships.find(
-    (m) => m.organization.id === user.activeOrganizationId
+  const target = workspaceId ? await db.workspace.findUnique({
+    where: { id: workspaceId }, select: { organizationId: true },
+  }) : null;
+  if (workspaceId && !target) redirect("/");
+  let pick = user.memberships.find((m) =>
+    m.organization.id === (target?.organizationId ?? user.activeOrganizationId)
   );
+  if (workspaceId && !pick) redirect("/");
   if (!pick) {
     pick = user.memberships[0];
     await db.user
-      .update({
-        where: { id: user.id },
+      .updateMany({
+        where: { id: user.id, activeOrganizationId: user.activeOrganizationId },
         data: { activeOrganizationId: pick.organization.id },
       })
       .catch(() => {});
@@ -68,9 +75,9 @@ export async function getWorkspaceUser(): Promise<WorkspaceUser> {
 // ─── Get a workspace by id (must belong to an org the user belongs to) ──────
 
 export async function getWorkspaceById(
-  workspaceId: string,
-  _userId?: string
+  workspaceId: string
 ): Promise<WorkspaceData> {
+  requireId(workspaceId, "workspace ID");
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
@@ -89,6 +96,7 @@ export async function getWorkspaceById(
     select: {
       id: true,
       title: true,
+      revision: true,
       messages: true,
       fileData: true,
       githubRepoUrl: true,
@@ -99,9 +107,13 @@ export async function getWorkspaceById(
   });
 
   if (!workspace) redirect("/");
+  const target = await db.githubPushTarget.findFirst({ where: { workspaceId, userId: user.id }, orderBy: { lastPushedAt: "desc" } });
 
   return {
     ...workspace,
-    lastPushedAt: workspace.lastPushedAt?.toISOString() ?? null,
+    githubRepoUrl: target?.repoUrl ?? null,
+    githubRepoFullName: target?.repoFullName ?? null,
+    githubBranch: target?.branch ?? null,
+    lastPushedAt: target?.lastPushedAt.toISOString() ?? null,
   };
 }

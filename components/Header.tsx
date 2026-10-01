@@ -40,7 +40,7 @@ export default async function Header() {
 
             <OrgSwitcher orgs={orgs} activeOrganizationId={pick?.organization.id ?? null} />
             <MembersDialog key={`members-${pick?.organization.id}`} />
-            {orgCredits !== null && <HeaderCredits key={`credits-${pick?.organization.id}`} initial={orgCredits} orgPlan={orgPlan} orgRole={orgRole} />}
+            {orgCredits !== null && pick && <HeaderCredits key={`credits-${pick.organization.id}`} orgId={pick.organization.id} initial={orgCredits} orgPlan={orgPlan} orgRole={orgRole} />}
 
             <UserButton />
           </Show>

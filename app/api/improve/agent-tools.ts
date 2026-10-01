@@ -1,5 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
+import { isSafeFilePath } from "@/lib/validation";
 
 // Mutable per-run accumulation, owned by the route (finishRun, getChangedPaths
 // and the NO_OP check all read these same objects, so the factory mutates in
@@ -23,8 +24,9 @@ export function createImproveTools(
     inputSchema: z.object({
       path: z
         .string()
+        .refine(isSafeFilePath)
         .describe("File path exactly as it appears, e.g. /App.js"),
-      code: z.string().describe("Complete new contents of the file"),
+      code: z.string().max(1_000_000).describe("Complete new contents of the file"),
       reason: z
         .string()
         .describe("One sentence explaining what you changed and why"),
@@ -44,9 +46,10 @@ export function createImproveTools(
     description:
       "Add an npm package the edited code needs. Only use packages that exist on npm.",
     inputSchema: z.object({
-      package: z.string().describe("npm package name, e.g. framer-motion"),
+      package: z.string().regex(/^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/).describe("npm package name, e.g. framer-motion"),
       version: z
         .string()
+        .max(100)
         .default("latest")
         .describe("Version range, default latest"),
     }),

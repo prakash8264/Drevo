@@ -1,6 +1,7 @@
 // Isolated regressions: executes the actual TS routes/component with fixture
 // Clerk/Prisma dependencies. Never loads .env or connects to external services.
 // Run: node scripts/test-organization-invitation.cjs
+/* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { readFileSync } = require("node:fs");
@@ -137,29 +138,32 @@ function completion({ userId = "user_fixture", memberUserId = userId, memberOrg 
   const writes = [], members = new Map(), queries = [];
   if (existingRole) members.set("member", { id: "member", role: existingRole });
   const tx = {
+    $queryRaw: async () => linked ? [{ id: "db_org" }] : [],
     user: {
+      async findUnique() { return { id: "db_user" }; },
       async upsert(args) { writes.push(args); return { id: "db_user" }; },
-      async update(args) { writes.push(args); return {}; },
+      async updateMany(args) { writes.push(args); return {}; },
     },
     organizationMember: {
+      async findUnique() { return members.get("member") ?? null; },
+      async findMany() { return []; },
       async upsert(args) {
         writes.push(args);
-        if (!members.has("member")) members.set("member", { id: "member", role: args.create.role });
+        members.set("member", { id: "member", role: members.has("member") ? args.update.role : args.create.role });
         return members.get("member");
       },
       async update(args) { writes.push(args); Object.assign(members.get("member"), args.data); },
     },
   };
-  const route = load("app/api/orgs/invitations/complete/route.ts", {
-    "@clerk/nextjs/server": { auth: async () => ({ userId }) },
-    "next/server": { NextResponse: Response }, zod: require("zod"),
+  const sync = load("lib/membership-sync.ts", {
+    "@/lib/validation": { requireId() {} },
     "@/lib/clerk": {
       toPrismaRole: (role) => role === "org:admin" ? "ADMIN" : "MEMBER",
       getClerk: async () => ({
         organizations: { async getOrganizationMembershipList(params) {
           queries.push(params);
           if (clerkFailure) throw new Error("Clerk unavailable");
-          return { data: member ? [{ publicUserData: { userId: memberUserId }, organization: { id: memberOrg }, role: "org:member" }] : [] };
+          return { data: member ? [{ publicUserData: { userId: memberUserId }, organization: { id: memberOrg }, role: existingRole === "OWNER" ? "org:admin" : "org:member" }] : [] };
         } },
         users: { getUser: async () => ({ primaryEmailAddressId: "email", emailAddresses: [{ id: "email", emailAddress: "fixture@example.com" }] }) },
       }),
@@ -168,6 +172,11 @@ function completion({ userId = "user_fixture", memberUserId = userId, memberOrg 
       organization: { findUnique: async () => linked ? { id: "db_org" } : null },
       $transaction: (fn) => fn(tx),
     } },
+  });
+  const route = load("app/api/orgs/invitations/complete/route.ts", {
+    "@clerk/nextjs/server": { auth: async () => ({ userId }) },
+    "next/server": { NextResponse: Response }, zod: require("zod"),
+    "@/lib/membership-sync": sync,
   });
   return {
     writes, members, queries,
@@ -212,6 +221,7 @@ test("webhook verifies the original signed bytes and rejects tampering", async (
     "@/lib/prisma": { db: new Proxy({}, { get() { throw new Error("Unexpected DB access"); } }) },
     "@/lib/clerk": {},
     "@/lib/billing": { subscriptionOrgId: () => null, syncOrgPlan: async () => null },
+    "@/lib/membership-sync": {},
   }, { process: { env: { CLERK_WEBHOOK_SECRET: secret } } });
   const headers = {
     "svix-id": "msg_fixture", "svix-timestamp": String(Math.floor(timestamp.getTime() / 1000)),

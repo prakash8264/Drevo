@@ -3,7 +3,7 @@ import arcjet, {
   detectPromptInjection,
 } from "@arcjet/next";
 
-// Route-level Arcjet client for /api/gen-ai-code only.
+// Shared route-level protection for generation and improvement requests.
 // shield + detectBot handled globally in proxy.ts,
 // Characteristics: "userId" means each Clerk user gets their own token bucket,
 // so corporate offices / VPNs sharing an IP don't share rate limits.

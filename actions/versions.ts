@@ -5,6 +5,8 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/prisma";
 import type { FileData } from "@/types/workspace";
 import type { VersionDetail, VersionSummary } from "@/types/version";
+import { requireId } from "@/lib/validation";
+import { pruneVersionsBestEffort } from "@/lib/versions";
 
 export type { VersionDetail, VersionSummary } from "@/types/version";
 
@@ -56,6 +58,7 @@ async function assertOrgAccess(workspaceId: string, orgIds: string[]) {
 export async function getVersions(
   workspaceId: string
 ): Promise<VersionSummary[]> {
+  requireId(workspaceId, "workspace ID");
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
@@ -63,7 +66,7 @@ export async function getVersions(
   await assertOrgAccess(workspaceId, orgIds);
 
   const versions = await db.workspaceVersion.findMany({
-    where: { workspaceId },
+    where: { workspaceId, workspace: { organization: { members: { some: { user: { clerkId } } } } } },
     select: { id: true, summary: true, fileData: true, createdAt: true },
     orderBy: { createdAt: "desc" },
     take: MAX_VERSIONS_PER_WORKSPACE,
@@ -78,66 +81,36 @@ export async function getVersions(
 
 export async function restoreVersion(
   workspaceId: string,
-  versionId: string
-): Promise<VersionDetail> {
+  versionId: string,
+  expectedRevision: number
+): Promise<VersionDetail & { revision: number }> {
+  requireId(workspaceId, "workspace ID");
+  requireId(versionId, "version ID");
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("Invalid workspace revision");
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/");
 
   const orgIds = await getUserOrgIds(clerkId);
   await assertOrgAccess(workspaceId, orgIds);
 
-  const [workspace, version] = await Promise.all([
-    db.workspace.findFirst({
-      where: { id: workspaceId, organizationId: { in: orgIds } },
-      select: { fileData: true },
-    }),
-    db.workspaceVersion.findUnique({
-      where: { id: versionId, workspaceId },
-    }),
-  ]);
-  if (!workspace || !version) redirect("/");
-
+  const version = await db.workspaceVersion.findUnique({ where: { id: versionId, workspaceId } });
+  if (!version) redirect("/");
   const restoredFileData = version.fileData as unknown as FileData;
-
-  await db.$transaction([
-    // Snapshot current state so this restore can be undone
-    ...(workspace.fileData
-      ? [
-          db.workspaceVersion.create({
-            data: {
-              workspaceId,
-              fileData: workspace.fileData as never,
-              summary: "Before restore",
-            },
-          }),
-        ]
-      : []),
-    db.workspace.update({
-      where: { id: workspaceId },
-      data: { fileData: restoredFileData as never },
-    }),
-  ]);
-
-  await pruneVersions(workspaceId);
-
-  return {
-    ...toSummary(version),
-    fileData: restoredFileData,
-  };
-}
-
-// ─── Shared helpers (also used by the AI routes) ─────────────────────────────
-
-export async function pruneVersions(workspaceId: string): Promise<void> {
-  const overflow = await db.workspaceVersion.findMany({
-    where: { workspaceId },
-    select: { id: true },
-    orderBy: { createdAt: "desc" },
-    skip: MAX_VERSIONS_PER_WORKSPACE,
-  });
-  if (overflow.length > 0) {
-    await db.workspaceVersion.deleteMany({
-      where: { id: { in: overflow.map((v) => v.id) } },
+  await db.$transaction(async (tx) => {
+    const workspace = await tx.workspace.findFirst({
+      where: { id: workspaceId, organizationId: { in: orgIds }, revision: expectedRevision },
+      select: { fileData: true },
     });
-  }
+    if (!workspace) throw new Error("Workspace changed. Reload before restoring.");
+    const updated = await tx.workspace.updateMany({
+      where: { id: workspaceId, revision: expectedRevision, organization: { members: { some: { user: { clerkId } } } } },
+      data: { fileData: restoredFileData as never, revision: { increment: 1 } },
+    });
+    if (!updated.count) throw new Error("Workspace changed. Reload before restoring.");
+    if (workspace.fileData) await tx.workspaceVersion.create({
+      data: { workspaceId, fileData: workspace.fileData as never, summary: "Before restore" },
+    });
+  });
+  await pruneVersionsBestEffort(workspaceId);
+  return { ...toSummary(version), fileData: restoredFileData, revision: expectedRevision + 1 };
 }

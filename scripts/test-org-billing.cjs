@@ -40,7 +40,7 @@ const clerkBilling = (slug) => async () => ({
   billing: {
     getOrganizationBillingSubscription: async (organizationId) => {
       assert.equal(organizationId, "org_x");
-      return { subscriptionItems: [{ status: "active", plan: { slug } }] };
+      return { id: "sub_fixture", subscriptionItems: [{ status: "active", plan: { slug }, periodStart: Date.now() - 1000, periodEnd: Date.now() + 86400000, planPeriod: "month", isFreeTrial: false }] };
     },
   },
 });
@@ -52,25 +52,35 @@ const throwingBilling = async () => ({
 
 function makeDb({ linked = true, org = { id: "db_org", plan: "free", credits: 10 }, mirrorMissing = false } = {}) {
   const updates = [];
+  org = { ...org, billingBaselineAt: new Date(), billingBaselinePlan: org.plan };
+  const grants = new Set();
   const db = {
+    $queryRaw: async () => mirrorMissing ? [] : [{ id: org.id }],
     organization: {
       findUnique: async (args) => {
         const sel = Object.keys(args.select || {});
         if (sel.length === 1 && sel[0] === "clerkOrgId") return linked ? { clerkOrgId: "org_x" } : null;
         return mirrorMissing ? null : org;
       },
-      update: async (args) => { updates.push(args); return {}; },
+      findUniqueOrThrow: async () => org,
+      update: async (args) => { updates.push(args); org.plan = args.data.plan; org.credits += args.data.credits?.increment ?? 0; return org; },
     },
+    organizationCreditGrant: { createMany: async ({ data }) => {
+      if (grants.has(data[0].key)) return { count: 0 };
+      grants.add(data[0].key); return { count: 1 };
+    } },
     organizationMember: { findUnique: async () => null },
     user: { findUnique: async () => null },
   };
-  return { db, updates };
+  db.$transaction = (fn) => fn(db);
+  return { db, updates, grants };
 }
 
 function billingModule(db, getClerk) {
   return load("lib/billing.ts", {
     "@/lib/prisma": { db },
-    "@/lib/clerk": { getClerk, toDrevoPlan: clerkLib.toDrevoPlan, toppedUpCredits: clerkLib.toppedUpCredits },
+    "@/lib/clerk": { getClerk, toDrevoPlan: clerkLib.toDrevoPlan },
+    "@/lib/constants": { PLANS: { free: { credits: 10 }, starter: { credits: 50 }, pro: { credits: 150 } } },
   });
 }
 
@@ -85,12 +95,12 @@ test("subscription org id resolves across payload shapes, payer first", () => {
   assert.equal(subscriptionOrgId(undefined), null);
 });
 
-test("plan sync upgrades free to pro with the top-up delta", async () => {
+test("first paid period adds its full allowance while preserving trial credits", async () => {
   const { db, updates } = makeDb();
   const { syncOrgPlan } = billingModule(db, clerkBilling("proorg"));
-  assert.deepEqual(plain(await syncOrgPlan("org_x")), { plan: "pro", credits: 150, updated: true });
+  assert.deepEqual(plain(await syncOrgPlan("org_x")), { plan: "pro", credits: 160, updated: true });
   assert.equal(updates.length, 1);
-  assert.deepEqual(plain(updates[0].data), { plan: "pro", credits: 150 });
+  assert.deepEqual(plain(updates[0].data), { plan: "pro", credits: { increment: 150 } });
 });
 
 test("plan sync is a no-op when the plan already matches", async () => {
@@ -107,10 +117,10 @@ test("plan sync returns null for unlinked orgs without writing", async () => {
   assert.equal(updates.length, 0);
 });
 
-test("missing Clerk subscription resolves to free without top-up", async () => {
+test("provider failure preserves the plan/balance and asks for a retry", async () => {
   const { db, updates } = makeDb();
   const { syncOrgPlan } = billingModule(db, throwingBilling);
-  assert.deepEqual(plain(await syncOrgPlan("org_x")), { plan: "free", credits: 10, updated: false });
+  await assert.rejects(syncOrgPlan("org_x"), /no subscription/);
   assert.equal(updates.length, 0);
 });
 
@@ -137,7 +147,7 @@ test("manual sync rejects unlinked orgs and applies the Clerk plan otherwise", a
   const ok = syncRoute();
   const res = await ok.run();
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { ok: true, plan: "pro", credits: 150, updated: true });
+  assert.deepEqual(await res.json(), { ok: true, plan: "pro", credits: 160, updated: true });
 });
 
 test("webhook subscription.created with organization_id shape (no payer) still syncs", async () => {
@@ -150,6 +160,7 @@ test("webhook subscription.created with organization_id shape (no payer) still s
     "@/lib/prisma": { db },
     "@/lib/clerk": { getClerk: clerkBilling("proorg"), toPrismaRole: () => "MEMBER" },
     "@/lib/billing": billing,
+    "@/lib/membership-sync": {},
   }, { process: { env: { CLERK_WEBHOOK_SECRET: secret } } });
 
   const body = JSON.stringify({ type: "subscription.created", data: { organization_id: "org_x" } });
@@ -161,7 +172,7 @@ test("webhook subscription.created with organization_id shape (no payer) still s
   const res = await route.POST(new Request("https://example.com/api/webhooks/clerk", { method: "POST", headers, body }));
   assert.equal(res.status, 200);
   assert.equal(updates.length, 1);
-  assert.deepEqual(plain(updates[0].data), { plan: "pro", credits: 150 });
+  assert.deepEqual(plain(updates[0].data), { plan: "pro", credits: { increment: 150 } });
 });
 
 test("webhook subscription event without any org id is a logged skip, not a failure", async () => {
@@ -174,6 +185,7 @@ test("webhook subscription event without any org id is a logged skip, not a fail
     "@/lib/prisma": { db },
     "@/lib/clerk": { getClerk: clerkBilling("proorg"), toPrismaRole: () => "MEMBER" },
     "@/lib/billing": billing,
+    "@/lib/membership-sync": {},
   }, { process: { env: { CLERK_WEBHOOK_SECRET: secret } } });
 
   const body = JSON.stringify({ type: "subscription.updated", data: {} });
@@ -196,7 +208,7 @@ test("organization.created links the exact metadata row, not another unlinked or
       organization: { async updateMany(args) { updates.push(plain(args)); } },
       user: { findUnique() { throw new Error("Must not guess another org from the creator's memberships"); } },
     } },
-    "@/lib/clerk": {}, "@/lib/billing": {},
+    "@/lib/clerk": {}, "@/lib/billing": {}, "@/lib/membership-sync": {},
   }, { process: { env: { CLERK_WEBHOOK_SECRET: secret } } });
   const body = JSON.stringify({ type: "organization.created", data: {
     id: "org_new", created_by: "user_owner", private_metadata: { drevoOrganizationId: "db_new" },

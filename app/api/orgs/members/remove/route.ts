@@ -58,33 +58,30 @@ export async function DELETE(request: NextRequest) {
     }
   }
 
-  // Clerk-first: if Clerk fails we abort before touching Prisma (clean).
-  // If Prisma fails after a Clerk success, the membership-deleted webhook
-  // self-heals by removing the Prisma row + repairing the pointer.
-  const org = await db.organization.findUnique({
-    where: { id: active.organization.id },
-    select: { clerkOrgId: true },
-  });
-  if (org?.clerkOrgId) {
-    try {
-      const clerk = await getClerk();
-      await clerk.organizations.deleteOrganizationMembership({
-        organizationId: org.clerkOrgId,
-        userId: target.user.clerkId,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Clerk removal failed.";
-      return NextResponse.json({ message: msg }, { status: 502 });
-    }
+  try {
+    const clerk = await getClerk();
+    await db.$transaction(async (tx) => {
+      const [org] = await tx.$queryRaw<{ clerkOrgId: string | null }[]>`SELECT "clerkOrgId" FROM "Organization" WHERE "id" = ${active.organization.id} FOR UPDATE`;
+      const caller = await tx.organizationMember.findUnique({ where: { id: active.membership.id } });
+      const fresh = await tx.organizationMember.findUnique({ where: { id: target.id } });
+      if (!caller || !fresh || (!isSelf && (caller.role === "MEMBER" || (caller.role === "ADMIN" && fresh.role === "OWNER")))) throw new Error("Member permissions changed");
+      if (fresh.role === "OWNER" && await tx.organizationMember.count({ where: { organizationId: active.organization.id, role: "OWNER" } }) <= 1) throw new Error("The sole OWNER cannot leave or be removed");
+      if (org?.clerkOrgId) {
+        if (!isSelf) {
+          const currentCaller = await clerk.organizations.getOrganizationMembershipList({ organizationId: org.clerkOrgId, userId: [active.clerkId], limit: 1 });
+          if (!currentCaller.data.some((m) => m.publicUserData?.userId === active.clerkId && m.role === "org:admin")) throw new Error("Clerk administrator access is required");
+        }
+        try { await clerk.organizations.deleteOrganizationMembership({ organizationId: org.clerkOrgId, userId: target.user.clerkId }); }
+        catch (error) { if ((error as { status?: number }).status !== 404) throw error; }
+      }
+      await tx.organizationMember.deleteMany({ where: { id: target.id, organizationId: active.organization.id } });
+      const next = await tx.organizationMember.findFirst({ where: { userId: target.userId }, orderBy: { createdAt: "asc" }, select: { organizationId: true } });
+      await tx.user.updateMany({ where: { id: target.userId, activeOrganizationId: active.organization.id }, data: { activeOrganizationId: next?.organizationId ?? null } });
+    }, { timeout: 20000 });
+  } catch (error) {
+    console.error("[orgs/members/remove] Clerk-first removal failed:", error);
+    return NextResponse.json({ message: "Could not remove the member. Please reload and retry." }, { status: 503 });
   }
-
-  await db.organizationMember.delete({ where: { id: target.id } });
-
-  // Repair active pointer if the removed user had this org active.
-  await db.user.updateMany({
-    where: { id: target.userId, activeOrganizationId: active.organization.id },
-    data: { activeOrganizationId: null },
-  });
 
   return NextResponse.json({ ok: true, selfRemoved: isSelf });
 }

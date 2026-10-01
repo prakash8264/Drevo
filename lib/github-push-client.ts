@@ -15,6 +15,7 @@ export interface PushSuccess {
   fullName: string;
   branch: string;
   unchanged?: boolean;
+  trackingSaved?: boolean;
 }
 
 export interface PushFailure {
@@ -46,6 +47,7 @@ export async function pushToGithub(
     fullName?: string;
     branch?: string;
     unchanged?: boolean;
+    trackingSaved?: boolean;
     message?: string;
     code?: string;
   } | null;
@@ -67,6 +69,7 @@ export async function pushToGithub(
       fullName: data.fullName ?? "",
       branch: data.branch ?? "main",
       unchanged: data.unchanged,
+      trackingSaved: data.trackingSaved,
     },
   };
 }

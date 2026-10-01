@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/prisma";
 import { PLANS } from "@/lib/constants";
 import type { OrganizationRole } from "@/lib/generated/prisma/client";
+import { requireId } from "@/lib/validation";
 
 export type { OrganizationRole };
 
@@ -56,8 +57,8 @@ export async function ensurePersonalOrganization(userId: string) {
   }
   // Has any membership → repair active pointer, no new org.
   if (user.memberships.length > 0) {
-    await db.user.update({
-      where: { id: userId },
+    await db.user.updateMany({
+      where: { id: userId, activeOrganizationId: user.activeOrganizationId },
       data: { activeOrganizationId: user.memberships[0].organizationId },
     });
     return;
@@ -70,16 +71,22 @@ export async function ensurePersonalOrganization(userId: string) {
   let prismaOrgId: string | null = null;
   try {
     await db.$transaction(async (tx) => {
+      // User-row lock: two first requests cannot create two personal orgs.
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
       const again = await tx.organizationMember.findFirst({
         where: { userId },
         select: { id: true },
       });
       if (again) return;
+      const trial = await tx.user.updateMany({
+        where: { id: userId, trialCreditsGrantedAt: null },
+        data: { trialCreditsGrantedAt: new Date() },
+      });
       const org = await tx.organization.create({
         data: {
           name: personalOrgName(user.name),
           plan: "free",
-          credits: PLANS.free.credits,
+          credits: trial.count ? PLANS.free.credits : 0,
         },
       });
       await tx.organizationMember.create({
@@ -101,8 +108,8 @@ export async function ensurePersonalOrganization(userId: string) {
       orderBy: { createdAt: "asc" },
     });
     if (winner) {
-      await db.user.update({
-        where: { id: userId },
+      await db.user.updateMany({
+        where: { id: userId, activeOrganizationId: user.activeOrganizationId },
         data: { activeOrganizationId: winner.organizationId },
       });
     }
@@ -158,8 +165,8 @@ export const getActiveOrganization = cache(async (): Promise<ActiveOrg> => {
     pick = user.memberships[0];
     // Best-effort repair; never blocks the request.
     db.user
-      .update({
-        where: { id: user.id },
+      .updateMany({
+        where: { id: user.id, activeOrganizationId: user.activeOrganizationId },
         data: { activeOrganizationId: pick.organization.id },
       })
       .catch(() => {});
@@ -176,6 +183,7 @@ export const getActiveOrganization = cache(async (): Promise<ActiveOrg> => {
 
 /** Membership of the caller in the org that owns a workspace. Null if none. */
 export async function getMembershipForOrganization(organizationId: string) {
+  requireId(organizationId, "organization ID");
   const { userId: clerkId } = await auth();
   if (!clerkId) return null;
   const user = await db.user.findUnique({
@@ -194,6 +202,7 @@ export async function getMembershipForOrganization(organizationId: string) {
 export async function requireOrganizationMember(
   organizationId: string
 ): Promise<ActiveOrg> {
+  requireId(organizationId, "organization ID");
   const active = await getActiveOrganization();
   // Active-org fast path; otherwise check membership in the target org
   // (workspace routes authorize via workspace org, not active org).

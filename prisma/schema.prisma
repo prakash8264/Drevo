@@ -26,6 +26,7 @@ model User {
   // Optional FK so deleting/switching orgs never deletes the user.
   activeOrganizationId String?
   activeOrganization   Organization? @relation("ActiveOrganization", fields: [activeOrganizationId], references: [id], onDelete: SetNull)
+  trialCreditsGrantedAt DateTime?
 
   githubAccessToken String? // encrypted GitHub OAuth token, never sent to client
   githubUsername    String?
@@ -44,13 +45,16 @@ model Organization {
   // Prisma mirrors + owns app data). Null until backfilled.
   clerkOrgId String? @unique
   plan      String   @default("free") // free | starter | pro — synced from Clerk org subscription via webhook
-  credits   Int      @default(10) // shared balance (replaces User.credits)
+  credits   Int      @default(0) // trials are allocated once per user, never per org
+  billingBaselineAt DateTime @default(now())
+  billingBaselinePlan String @default("free")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   members   OrganizationMember[]
   workspaces Workspace[]
   activeForUsers User[] @relation("ActiveOrganization")
+  creditGrants OrganizationCreditGrant[]
 
   @@index([plan])
 }
@@ -85,9 +89,11 @@ model Workspace {
   createdBy      User         @relation("WorkspaceCreatedBy", fields: [createdById], references: [id])
   messages  Json     @default("[]")
   fileData  Json?
+  revision  Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   versions  WorkspaceVersion[]
+  githubPushTargets GithubPushTarget[]
 
   githubRepoUrl      String?
   githubRepoFullName String?
@@ -108,4 +114,37 @@ model WorkspaceVersion {
   createdAt   DateTime @default(now())
 
   @@index([workspaceId])
+}
+
+model OrganizationCreditGrant {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  key String
+  credits Int
+  createdAt DateTime @default(now())
+
+  @@unique([organizationId, key])
+}
+
+// User-owned GitHub target history; never share deletion lists across targets.
+model GithubPushTarget {
+  id String @id @default(cuid())
+  workspaceId String
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId String
+  repoFullName String
+  branch String
+  repoUrl String
+  pushedFiles Json
+  lastPushedAt DateTime @default(now())
+
+  @@unique([workspaceId, userId, repoFullName, branch])
+}
+
+// Distributed, expiring concurrency guard for serverless AI requests.
+model AiRunLease {
+  key String @id
+  token String
+  expiresAt DateTime
 }

@@ -98,7 +98,7 @@ export async function POST(request: NextRequest) {
 
   const workspace = await db.workspace.findUnique({
     where: { id: workspaceId },
-    select: { id: true, title: true, fileData: true, githubPushedFiles: true, organizationId: true },
+    select: { id: true, title: true, fileData: true, organizationId: true },
   });
   if (!workspace) return NextResponse.json({ message: "Workspace not found." }, { status: 404 });
   // Org boundary: workspace must belong to an org the caller belongs to.
@@ -118,7 +118,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const projectFiles = buildProjectFilesFromFileData(fileData, workspace.title);
+  let projectFiles: Record<string, string>;
+  try { projectFiles = buildProjectFilesFromFileData(fileData, workspace.title); }
+  catch { return NextResponse.json({ message: "Project contains unsafe file paths. Fix the project before pushing." }, { status: 400 }); }
   const entries = Object.entries(projectFiles);
   if (entries.length > MAX_FILES) {
     return NextResponse.json(
@@ -168,12 +170,12 @@ export async function POST(request: NextRequest) {
         octokit,
         username: user.githubUsername ?? "",
         workspaceId: workspace.id,
+        userId: user.id,
         repoFullName,
         branch,
         commitMessage,
         projectFiles,
         entries,
-        previousPaths: parsePushedPaths(workspace.githubPushedFiles),
       });
     }
 
@@ -294,21 +296,14 @@ export async function POST(request: NextRequest) {
     }
 
     const fullName = `${owner}/${repo}`;
-    await db.workspace.update({
-      where: { id: workspace.id },
-      data: {
-        githubRepoUrl: repoUrl,
-        githubRepoFullName: fullName,
-        githubBranch: BRANCH,
-        lastPushedAt: new Date(),
-        githubPushedFiles: entries.map(([path]) => path),
-      },
-    });
-
-    return NextResponse.json({ repoUrl, fullName, branch: BRANCH });
+    const trackingSaved = await recordPush(workspace.id, user.id, fullName, BRANCH, repoUrl, entries.map(([path]) => path));
+    return NextResponse.json({ repoUrl, fullName, branch: BRANCH, trackingSaved });
   } catch (err) {
     const status = (err as { status?: number })?.status;
-    if (status === 401 || status === 403) {
+    if ((status === 403 || status === 429) && /rate limit/i.test(String((err as Error)?.message ?? ""))) {
+      return NextResponse.json({ message: "GitHub rate limit hit. Wait a bit and try again." }, { status: 429 });
+    }
+    if (status === 401) {
       return NextResponse.json(
         {
           message: "GitHub rejected the request. Reconnect your GitHub account and try again.",
@@ -317,10 +312,10 @@ export async function POST(request: NextRequest) {
         { status: 401 }
       );
     }
-    if (status === 403 && /rate limit/i.test(String((err as Error)?.message ?? ""))) {
+    if (status === 403) {
       return NextResponse.json(
-        { message: "GitHub rate limit hit. Wait a bit and try again." },
-        { status: 429 }
+        { message: "GitHub denied access to this repository. Check repository permissions." },
+        { status: 403 }
       );
     }
     console.error("[github/push] failed:", err);
@@ -338,12 +333,28 @@ interface ExistingPushInput {
   octokit: import("octokit").Octokit;
   username: string;
   workspaceId: string;
+  userId: string;
   repoFullName: string;
   branch: string;
   commitMessage: string;
   projectFiles: Record<string, string>;
   entries: [string, string][];
-  previousPaths: string[];
+}
+
+async function recordPush(workspaceId: string, userId: string, fullName: string, branch: string, repoUrl: string, pushedFiles: string[]) {
+  const repoFullName = fullName.toLowerCase();
+  try {
+    await db.githubPushTarget.upsert({
+      where: { workspaceId_userId_repoFullName_branch: { workspaceId, userId, repoFullName, branch } },
+      create: { workspaceId, userId, repoFullName, branch, repoUrl, pushedFiles },
+      update: { repoUrl, pushedFiles, lastPushedAt: new Date() },
+    });
+    return true;
+  } catch (error) {
+    // GitHub already succeeded. Do not misreport it as a failed remote push.
+    console.error("[github/push] post-push tracking failed:", error);
+    return false;
+  }
 }
 
 /**
@@ -357,12 +368,12 @@ async function pushToExisting(input: ExistingPushInput) {
     octokit,
     username,
     workspaceId,
+    userId,
     repoFullName,
     branch,
     commitMessage,
     projectFiles,
     entries,
-    previousPaths,
   } = input;
 
   const target = parseRepoFullName(repoFullName);
@@ -377,6 +388,11 @@ async function pushToExisting(input: ExistingPushInput) {
   }
 
   try {
+    const tracked = await db.githubPushTarget.findUnique({
+      where: { workspaceId_userId_repoFullName_branch: { workspaceId, userId, repoFullName: repoFullName.toLowerCase(), branch } },
+      select: { pushedFiles: true },
+    });
+    const previousPaths = parsePushedPaths(tracked?.pushedFiles);
     const { data: repoData } = await octokit.rest.repos.get({ owner, repo }).catch((err: unknown) => {
       if ((err as { status?: number })?.status === 404) return { data: null };
       throw err;
@@ -460,17 +476,8 @@ async function pushToExisting(input: ExistingPushInput) {
       }
     }
     if (unchanged) {
-      await db.workspace.update({
-        where: { id: workspaceId },
-        data: {
-          githubRepoUrl: repoUrl,
-          githubRepoFullName: repoFullName,
-          githubBranch: branch,
-          lastPushedAt: new Date(),
-          githubPushedFiles: [...currentPaths],
-        },
-      });
-      return NextResponse.json({ repoUrl, fullName: repoFullName, branch, unchanged: true });
+      const trackingSaved = await recordPush(workspaceId, userId, repoFullName, branch, repoUrl, [...currentPaths]);
+      return NextResponse.json({ repoUrl, fullName: repoFullName, branch, unchanged: true, trackingSaved });
     }
 
     const treeEntries: { path: string; mode: "100644"; type: "blob"; sha: string | null }[] = [
@@ -517,20 +524,15 @@ async function pushToExisting(input: ExistingPushInput) {
       throw err;
     }
 
-    await db.workspace.update({
-      where: { id: workspaceId },
-      data: {
-        githubRepoUrl: repoUrl,
-        githubRepoFullName: repoFullName,
-        githubBranch: branch,
-        lastPushedAt: new Date(),
-        githubPushedFiles: [...currentPaths],
-      },
-    });
-    return NextResponse.json({ repoUrl, fullName: repoFullName, branch });
+    const trackingSaved = await recordPush(workspaceId, userId, repoFullName, branch, repoUrl, [...currentPaths]);
+    return NextResponse.json({ repoUrl, fullName: repoFullName, branch, trackingSaved });
   } catch (err) {
     const status = (err as { status?: number })?.status;
-    if (status === 401 || status === 403) {
+    if ((status === 403 || status === 429) && /rate limit/i.test(String((err as Error)?.message ?? ""))) {
+      return NextResponse.json({ message: "GitHub rate limit hit. Wait a bit and try again." }, { status: 429 });
+    }
+    if (status === 403) return NextResponse.json({ message: "GitHub denied repository access. Check repository permissions." }, { status: 403 });
+    if (status === 401) {
       return NextResponse.json(
         {
           message: "GitHub rejected the request. Reconnect your GitHub account and try again.",

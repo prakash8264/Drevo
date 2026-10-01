@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
 import { db } from "@/lib/prisma";
-import { PLANS } from "@/lib/constants";
 
 export const runtime = "nodejs";
 
@@ -32,7 +31,7 @@ export async function POST(request: NextRequest) {
   let organizationId: string | null = null;
   await db.$transaction(async (tx) => {
     const org = await tx.organization.create({
-      data: { name: parsed.data.name, plan: "free", credits: PLANS.free.credits },
+      data: { name: parsed.data.name, plan: "free", credits: 0 },
     });
     await tx.organizationMember.create({
       data: { organizationId: org.id, userId: user.id, role: "OWNER" },
